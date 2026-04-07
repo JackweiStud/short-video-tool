@@ -15,6 +15,10 @@ build/
 .env
 
 # Project specific
+runtime/tasks/
+docs/
+doc/
+tmp/asr-repro/
 downloads/
 output/
 output_*/
