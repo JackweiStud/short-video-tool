@@ -507,9 +507,22 @@ class Analyzer:
 
                 def _transcribe():
                     try:
+                        import platform
                         from faster_whisper import WhisperModel
-
-                        fw_model = WhisperModel(model_id, device="cpu", compute_type="int8")
+                        
+                        # Use CUDA if configured, else auto
+                        device_type = "cuda" if getattr(self.config, "enable_gpu", False) else "auto"
+                        
+                        # On Mac M-series (Apple Silicon), int8 is generally slower than float32.
+                        # "default" allows CTranslate2 to pick the most optimal available type.
+                        compute_type = "default"
+                        
+                        fw_model = WhisperModel(
+                            model_id, 
+                            device=device_type, 
+                            compute_type=compute_type,
+                            cpu_threads=max(1, os.cpu_count() - 2) if os.cpu_count() else 4
+                        )
                         segs, info = fw_model.transcribe(
                             chunk_wav,
                             language=language,
