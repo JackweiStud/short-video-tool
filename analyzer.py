@@ -340,13 +340,22 @@ class Analyzer:
         self, audio_path: str, model: str = "medium", language: str = "en"
     ) -> list:
         """
-        Run ASR using faster-whisper (primary) with chunked processing for long videos.
-        Falls back to openai-whisper CLI if faster-whisper is not available.
-
-        Returns:
-            list: [{"start": 0.0, "end": 2.5, "text": "Hello world",
-                    "words": [{"word": "Hello", "start": 0.0, "end": 0.4}, ...]}]
+        Run ASR using mlx-whisper (Apple Silicon), faster-whisper, or fallback to whisper CLI.
         """
+        import platform
+        # 1. Priority: mlx-whisper for Mac M-series (Apple Silicon GPU acceleration)
+        if platform.system() == "Darwin" and platform.machine() == "arm64":
+            try:
+                import mlx_whisper  # noqa: F401
+                logging.info("[ASR] mlx-whisper available on Apple Silicon, using native MLX engine for massive speedup")
+                return self._run_asr_mlx_whisper(audio_path, model, language)
+            except ImportError:
+                logging.warning(
+                    "[ASR] Apple Silicon detected but mlx-whisper not installed. "
+                    "Run `pip install mlx-whisper` for massive hardware-accelerated speedup."
+                )
+
+        # 2. Priority: faster-whisper
         try:
             from faster_whisper import WhisperModel  # noqa: F401
 
@@ -357,6 +366,65 @@ class Analyzer:
                 "[ASR] faster-whisper not available, falling back to whisper CLI"
             )
             return self._run_asr_whisper_cli(audio_path, model, language)
+
+    def _run_asr_mlx_whisper(
+        self, audio_path: str, model: str = "medium", language: str = "en"
+    ) -> list:
+        """
+        Run ASR using Apple MLX natively for Mac GPUs.
+        """
+        import mlx_whisper
+        import os
+
+        # Check for local model first
+        mlx_local_base = getattr(self.config, 'mlx_whisper_local_model_dir', None)
+        if mlx_local_base:
+            local_model_path = os.path.join(os.path.expanduser(mlx_local_base), f"whisper-{model}-mlx")
+            if os.path.isdir(local_model_path):
+                mlx_model_repo = local_model_path
+                logging.info(f"[mlx-whisper] Using local model: {mlx_model_repo}")
+            else:
+                mlx_model_repo = f"mlx-community/whisper-{model}-mlx"
+                logging.info(f"[mlx-whisper] Local model not found, using HF repo: {mlx_model_repo}")
+        else:
+            # Default fallback to mlx-community repo structures for whisper:
+            mlx_model_repo = f"mlx-community/whisper-{model}-mlx"
+            logging.info(f"[mlx-whisper] Transcribing audio with Apple GPU via: {mlx_model_repo}")
+        
+        try:
+            # MLX heavily optimizes memory and runs pure GPU natively. 
+            # Passing the audio file entirely works extremely well under this unified memory model.
+            result = mlx_whisper.transcribe(
+                audio_path,
+                path_or_hf_repo=mlx_model_repo,
+                word_timestamps=self.whisper_word_timestamps,
+                language=language,
+            )
+            
+            segments = []
+            for seg in result.get("segments", []):
+                words = []
+                for w in seg.get("words", []):
+                    words.append({
+                        "word": w.get("word", "").strip(),
+                        "start": round(w.get("start", 0.0), 3),
+                        "end": round(w.get("end", 0.0), 3),
+                    })
+                
+                segments.append({
+                    "start": round(seg.get("start", 0.0), 3),
+                    "end": round(seg.get("end", 0.0), 3),
+                    "text": seg.get("text", "").strip(),
+                    "words": words,
+                })
+                
+            logging.info(f"[mlx-whisper] Complete. Mapped {len(segments)} segments rapidly via Apple GPU.")
+            return segments
+            
+        except Exception as e:
+            logging.error(f"[mlx-whisper] Failed to run MLX transcription: {e}")
+            logging.warning("[mlx-whisper] Falling back to faster-whisper chunks...")
+            return self._run_asr_faster_whisper(audio_path, model, language)
 
     def _run_asr_faster_whisper(
         self, audio_path: str, model: str = "medium", language: str = "en"

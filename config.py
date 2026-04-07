@@ -199,7 +199,12 @@ class Config:
         default_factory=lambda: os.getenv("FASTER_WHISPER_LOCAL_MODEL_DIR", "~/models")
     )
     """faster-whisper 本地模型目录，模型子目录格式为 faster-whisper-{model}，设为空字符串则跳过本地查找直接下载"""
-    
+
+    mlx_whisper_local_model_dir: str = field(
+        default_factory=lambda: os.getenv("MLX_WHISPER_LOCAL_MODEL_DIR", "~/models")
+    )
+    """mlx-whisper 本地模型目录（Apple Silicon），模型子目录格式为 whisper-{model}-mlx，设为空字符串则跳过本地查找直接下载"""
+
     audio_climax_top_n: int = field(
         default_factory=lambda: int(os.getenv("AUDIO_CLIMAX_TOP_N", "5"))
     )
