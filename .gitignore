@@ -1,0 +1,48 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Environment
+.env
+
+# Project specific
+downloads/
+output/
+output_*/
+clips/
+subtitles/
+analysis_results/
+test_clips_fallback/
+cache/
+*.mp4
+*.wav
+*.json
+!requirements*.json
+!package*.json
+
+# Logs
+*.log
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/

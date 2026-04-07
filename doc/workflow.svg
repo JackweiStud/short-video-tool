@@ -1,0 +1,271 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 520">
+  <defs>
+    <!-- Neon glow filters -->
+    <filter id="glow-cyan" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+    <filter id="glow-pink" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="5" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="2" stdDeviation="6" flood-color="#00000080"/>
+    </filter>
+
+    <!-- Gradients -->
+    <linearGradient id="bg-grad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0a0e27"/>
+      <stop offset="50%" stop-color="#121638"/>
+      <stop offset="100%" stop-color="#0d1117"/>
+    </linearGradient>
+    <linearGradient id="grad-start" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#00e676"/>
+      <stop offset="100%" stop-color="#00bfa5"/>
+    </linearGradient>
+    <linearGradient id="grad-m1" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#ff9800"/>
+      <stop offset="100%" stop-color="#ff5722"/>
+    </linearGradient>
+    <linearGradient id="grad-m2" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#2196f3"/>
+      <stop offset="100%" stop-color="#00bcd4"/>
+    </linearGradient>
+    <linearGradient id="grad-m3" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#e040fb"/>
+      <stop offset="100%" stop-color="#7c4dff"/>
+    </linearGradient>
+    <linearGradient id="grad-m4" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#ff4081"/>
+      <stop offset="100%" stop-color="#f50057"/>
+    </linearGradient>
+    <linearGradient id="grad-m5" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#00bfa5"/>
+      <stop offset="100%" stop-color="#1de9b6"/>
+    </linearGradient>
+    <linearGradient id="grad-opt" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#ffc107"/>
+      <stop offset="100%" stop-color="#ffab00"/>
+    </linearGradient>
+    <linearGradient id="grad-out" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#76ff03"/>
+      <stop offset="100%" stop-color="#00e676"/>
+    </linearGradient>
+    <linearGradient id="arrow-grad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#00e5ff"/>
+      <stop offset="100%" stop-color="#7c4dff"/>
+    </linearGradient>
+
+    <!-- Arrow marker -->
+    <marker id="arrowhead" markerWidth="12" markerHeight="8" refX="10" refY="4" orient="auto">
+      <polygon points="0 0, 12 4, 0 8" fill="#00e5ff"/>
+    </marker>
+
+    <!-- Grid pattern for background -->
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1a2040" stroke-width="0.5"/>
+    </pattern>
+
+    <!-- Dot pattern -->
+    <pattern id="dots" width="20" height="20" patternUnits="userSpaceOnUse">
+      <circle cx="10" cy="10" r="0.8" fill="#1e2a50"/>
+    </pattern>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1600" height="520" fill="url(#bg-grad)"/>
+  <rect width="1600" height="520" fill="url(#grid)" opacity="0.5"/>
+  <rect width="1600" height="520" fill="url(#dots)" opacity="0.8"/>
+
+  <!-- Decorative circuit lines -->
+  <g opacity="0.15" stroke="#00e5ff" stroke-width="1" fill="none">
+    <path d="M 0 100 H 60 V 200 H 120"/>
+    <path d="M 1600 420 H 1540 V 320 H 1480"/>
+    <circle cx="60" cy="100" r="3" fill="#00e5ff"/>
+    <circle cx="120" cy="200" r="3" fill="#00e5ff"/>
+    <circle cx="1540" cy="420" r="3" fill="#00e5ff"/>
+    <circle cx="1480" cy="320" r="3" fill="#00e5ff"/>
+  </g>
+
+  <!-- Title bar -->
+  <rect x="0" y="0" width="1600" height="50" fill="#0a0e27" opacity="0.8"/>
+  <line x1="0" y1="50" x2="1600" y2="50" stroke="#00e5ff" stroke-width="1" opacity="0.4"/>
+  <text x="800" y="34" font-family="'SF Pro Display', 'PingFang SC', sans-serif" font-size="20" font-weight="700" text-anchor="middle" fill="#e0e0e0" letter-spacing="3">
+    ⚡ 跨平台短视频智能剪辑与翻译工具 — 功能流程图
+  </text>
+
+  <!-- ====== FLOW ROW (y center ~ 210) ====== -->
+
+  <!-- START node -->
+  <g filter="url(#shadow)">
+    <rect x="25" y="80" width="130" height="70" rx="35" fill="url(#grad-start)" opacity="0.9"/>
+    <text x="90" y="110" font-family="'SF Pro Display','PingFang SC',sans-serif" font-size="15" font-weight="700" text-anchor="middle" fill="#0a0e27">🎬 开始</text>
+    <text x="90" y="130" font-family="'PingFang SC',sans-serif" font-size="11" text-anchor="middle" fill="#1a3a2a">输入视频 URL</text>
+  </g>
+
+  <!-- Arrow 1 -->
+  <line x1="155" y1="115" x2="185" y2="115" stroke="url(#arrow-grad)" stroke-width="2.5" marker-end="url(#arrowhead)" filter="url(#glow-cyan)"/>
+
+  <!-- Module 1: Download -->
+  <g filter="url(#shadow)">
+    <rect x="190" y="70" width="155" height="90" rx="12" fill="#1a1e35" stroke="url(#grad-m1)" stroke-width="2"/>
+    <rect x="190" y="70" width="155" height="28" rx="12" fill="url(#grad-m1)" opacity="0.85"/>
+    <text x="267" y="90" font-family="'SF Pro Display','PingFang SC',sans-serif" font-size="13" font-weight="700" text-anchor="middle" fill="#fff">📥 模块 1：视频下载</text>
+    <text x="267" y="115" font-family="'PingFang SC',sans-serif" font-size="11" text-anchor="middle" fill="#b0b8cc">自动下载视频</text>
+    <text x="267" y="133" font-family="'PingFang SC',sans-serif" font-size="11" text-anchor="middle" fill="#b0b8cc">提取元数据</text>
+  </g>
+
+  <!-- Arrow 2 -->
+  <line x1="345" y1="115" x2="375" y2="115" stroke="url(#arrow-grad)" stroke-width="2.5" marker-end="url(#arrowhead)" filter="url(#glow-cyan)"/>
+
+  <!-- Module 2: Analyze -->
+  <g filter="url(#shadow)">
+    <rect x="380" y="60" width="170" height="110" rx="12" fill="#1a1e35" stroke="url(#grad-m2)" stroke-width="2"/>
+    <rect x="380" y="60" width="170" height="28" rx="12" fill="url(#grad-m2)" opacity="0.85"/>
+    <text x="465" y="80" font-family="'SF Pro Display','PingFang SC',sans-serif" font-size="13" font-weight="700" text-anchor="middle" fill="#fff">🔍 模块 2：智能分析</text>
+    <text x="465" y="105" font-family="'PingFang SC',sans-serif" font-size="11" text-anchor="middle" fill="#b0b8cc">语音识别 (ASR)</text>
+    <text x="465" y="123" font-family="'PingFang SC',sans-serif" font-size="11" text-anchor="middle" fill="#b0b8cc">音频高潮点检测</text>
+    <text x="465" y="141" font-family="'PingFang SC',sans-serif" font-size="11" text-anchor="middle" fill="#b0b8cc">场景切换检测</text>
+  </g>
+
+  <!-- Arrow 3 -->
+  <line x1="550" y1="115" x2="580" y2="115" stroke="url(#arrow-grad)" stroke-width="2.5" marker-end="url(#arrowhead)" filter="url(#glow-cyan)"/>
+
+  <!-- Module 3: Clip -->
+  <g filter="url(#shadow)">
+    <rect x="585" y="60" width="170" height="110" rx="12" fill="#1a1e35" stroke="url(#grad-m3)" stroke-width="2"/>
+    <rect x="585" y="60" width="170" height="28" rx="12" fill="url(#grad-m3)" opacity="0.85"/>
+    <text x="670" y="80" font-family="'SF Pro Display','PingFang SC',sans-serif" font-size="13" font-weight="700" text-anchor="middle" fill="#fff">✂️ 模块 3：智能剪辑</text>
+    <text x="670" y="105" font-family="'PingFang SC',sans-serif" font-size="11" text-anchor="middle" fill="#b0b8cc">识别精彩片段</text>
+    <text x="670" y="123" font-family="'PingFang SC',sans-serif" font-size="11" text-anchor="middle" fill="#b0b8cc">自动剪辑 15-60 秒短视频</text>
+    <text x="670" y="141" font-family="'PingFang SC',sans-serif" font-size="11" text-anchor="middle" fill="#b0b8cc">保持原始质量</text>
+  </g>
+
+  <!-- Arrow 4 -->
+  <line x1="755" y1="115" x2="785" y2="115" stroke="url(#arrow-grad)" stroke-width="2.5" marker-end="url(#arrowhead)" filter="url(#glow-cyan)"/>
+
+  <!-- Module 4: Translate -->
+  <g filter="url(#shadow)">
+    <rect x="790" y="60" width="170" height="110" rx="12" fill="#1a1e35" stroke="url(#grad-m4)" stroke-width="2"/>
+    <rect x="790" y="60" width="170" height="28" rx="12" fill="url(#grad-m4)" opacity="0.85"/>
+    <text x="875" y="80" font-family="'SF Pro Display','PingFang SC',sans-serif" font-size="13" font-weight="700" text-anchor="middle" fill="#fff">🌐 模块 4：多语言翻译</text>
+    <text x="875" y="105" font-family="'PingFang SC',sans-serif" font-size="11" text-anchor="middle" fill="#b0b8cc">生成中文字幕</text>
+    <text x="875" y="123" font-family="'PingFang SC',sans-serif" font-size="11" text-anchor="middle" fill="#b0b8cc">生成英文字幕</text>
+    <text x="875" y="141" font-family="'PingFang SC',sans-serif" font-size="11" text-anchor="middle" fill="#b0b8cc">保持时间同步</text>
+  </g>
+
+  <!-- Arrow 5 -->
+  <line x1="960" y1="115" x2="990" y2="115" stroke="url(#arrow-grad)" stroke-width="2.5" marker-end="url(#arrowhead)" filter="url(#glow-cyan)"/>
+
+  <!-- Module 5: Integrate -->
+  <g filter="url(#shadow)">
+    <rect x="995" y="70" width="155" height="90" rx="12" fill="#1a1e35" stroke="url(#grad-m5)" stroke-width="2"/>
+    <rect x="995" y="70" width="155" height="28" rx="12" fill="url(#grad-m5)" opacity="0.85"/>
+    <text x="1072" y="90" font-family="'SF Pro Display','PingFang SC',sans-serif" font-size="13" font-weight="700" text-anchor="middle" fill="#0a0e27">📦 模块 5：整合输出</text>
+    <text x="1072" y="115" font-family="'PingFang SC',sans-serif" font-size="11" text-anchor="middle" fill="#b0b8cc">统一目录结构</text>
+    <text x="1072" y="133" font-family="'PingFang SC',sans-serif" font-size="11" text-anchor="middle" fill="#b0b8cc">生成摘要报告</text>
+  </g>
+
+  <!-- Arrow 6 -->
+  <line x1="1150" y1="115" x2="1180" y2="115" stroke="url(#arrow-grad)" stroke-width="2.5" marker-end="url(#arrowhead)" filter="url(#glow-cyan)"/>
+
+  <!-- Optional: Embed subtitles -->
+  <g filter="url(#shadow)">
+    <rect x="1185" y="70" width="155" height="90" rx="12" fill="#1a1e35" stroke="url(#grad-opt)" stroke-width="2" stroke-dasharray="6,4"/>
+    <rect x="1185" y="70" width="155" height="28" rx="12" fill="url(#grad-opt)" opacity="0.75"/>
+    <text x="1262" y="90" font-family="'SF Pro Display','PingFang SC',sans-serif" font-size="13" font-weight="700" text-anchor="middle" fill="#1a1e35">🎨 可选：字幕嵌入</text>
+    <text x="1262" y="115" font-family="'PingFang SC',sans-serif" font-size="11" text-anchor="middle" fill="#b0b8cc">将字幕烧录到视频</text>
+    <text x="1262" y="133" font-family="'PingFang SC',sans-serif" font-size="10" text-anchor="middle" fill="#666">(可选功能)</text>
+  </g>
+
+  <!-- Arrow 7 -->
+  <line x1="1340" y1="115" x2="1370" y2="115" stroke="url(#arrow-grad)" stroke-width="2.5" marker-end="url(#arrowhead)" filter="url(#glow-cyan)"/>
+
+  <!-- END node -->
+  <g filter="url(#shadow)">
+    <rect x="1375" y="80" width="130" height="70" rx="35" fill="url(#grad-start)" opacity="0.9"/>
+    <text x="1440" y="110" font-family="'SF Pro Display','PingFang SC',sans-serif" font-size="15" font-weight="700" text-anchor="middle" fill="#0a0e27">🎉 完成</text>
+    <text x="1440" y="130" font-family="'PingFang SC',sans-serif" font-size="11" text-anchor="middle" fill="#1a3a2a">可直接分享</text>
+  </g>
+
+  <!-- ====== OUTPUT CARDS (bottom row) ====== -->
+  <g transform="translate(0, 200)">
+    <!-- Section label -->
+    <line x1="80" y1="10" x2="1520" y2="10" stroke="#00e5ff" stroke-width="0.5" opacity="0.3"/>
+    <text x="800" y="35" font-family="'SF Pro Display','PingFang SC',sans-serif" font-size="15" font-weight="600" text-anchor="middle" fill="#00e5ff" letter-spacing="4" opacity="0.7">📤  输 出 结 果</text>
+
+    <!-- Output card 1 -->
+    <g filter="url(#shadow)">
+      <rect x="80" y="55" width="260" height="110" rx="14" fill="#131830" stroke="#76ff03" stroke-width="1.5" opacity="0.95"/>
+      <text x="210" y="82" font-family="'SF Pro Display','PingFang SC',sans-serif" font-size="14" font-weight="700" text-anchor="middle" fill="#76ff03">✅ 剪辑视频</text>
+      <text x="210" y="105" font-family="'PingFang SC',sans-serif" font-size="12" text-anchor="middle" fill="#8e99b0">3-5 个精彩片段</text>
+      <text x="210" y="125" font-family="'PingFang SC',sans-serif" font-size="11" text-anchor="middle" fill="#5a6580">保持原始分辨率与宽高比</text>
+      <text x="210" y="145" font-family="'PingFang SC',sans-serif" font-size="11" text-anchor="middle" fill="#5a6580">无损 FFmpeg copy 模式</text>
+    </g>
+
+    <!-- Output card 2 -->
+    <g filter="url(#shadow)">
+      <rect x="380" y="55" width="260" height="110" rx="14" fill="#131830" stroke="#00e5ff" stroke-width="1.5" opacity="0.95"/>
+      <text x="510" y="82" font-family="'SF Pro Display','PingFang SC',sans-serif" font-size="14" font-weight="700" text-anchor="middle" fill="#00e5ff">✅ 字幕文件</text>
+      <text x="510" y="105" font-family="'PingFang SC',sans-serif" font-size="12" text-anchor="middle" fill="#8e99b0">中文 / 英文 / 原始语言</text>
+      <text x="510" y="125" font-family="'PingFang SC',sans-serif" font-size="11" text-anchor="middle" fill="#5a6580">SRT 格式 · 时间同步</text>
+      <text x="510" y="145" font-family="'PingFang SC',sans-serif" font-size="11" text-anchor="middle" fill="#5a6580">每个片段独立字幕</text>
+    </g>
+
+    <!-- Output card 3 -->
+    <g filter="url(#shadow)">
+      <rect x="680" y="55" width="260" height="110" rx="14" fill="#131830" stroke="#e040fb" stroke-width="1.5" opacity="0.95"/>
+      <text x="810" y="82" font-family="'SF Pro Display','PingFang SC',sans-serif" font-size="14" font-weight="700" text-anchor="middle" fill="#e040fb">✅ 嵌入字幕视频</text>
+      <text x="810" y="105" font-family="'PingFang SC',sans-serif" font-size="12" text-anchor="middle" fill="#8e99b0">可直接分享至社交平台</text>
+      <text x="810" y="125" font-family="'PingFang SC',sans-serif" font-size="11" text-anchor="middle" fill="#5a6580">字幕烧录到画面中</text>
+      <text x="810" y="145" font-family="'PingFang SC',sans-serif" font-size="11" text-anchor="middle" fill="#5a6580">(可选功能)</text>
+    </g>
+
+    <!-- Output card 4 -->
+    <g filter="url(#shadow)">
+      <rect x="980" y="55" width="260" height="110" rx="14" fill="#131830" stroke="#ffc107" stroke-width="1.5" opacity="0.95"/>
+      <text x="1110" y="82" font-family="'SF Pro Display','PingFang SC',sans-serif" font-size="14" font-weight="700" text-anchor="middle" fill="#ffc107">✅ 摘要报告</text>
+      <text x="1110" y="105" font-family="'PingFang SC',sans-serif" font-size="12" text-anchor="middle" fill="#8e99b0">完整统计信息</text>
+      <text x="1110" y="125" font-family="'PingFang SC',sans-serif" font-size="11" text-anchor="middle" fill="#5a6580">Markdown 格式</text>
+      <text x="1110" y="145" font-family="'PingFang SC',sans-serif" font-size="11" text-anchor="middle" fill="#5a6580">含元数据与处理日志</text>
+    </g>
+
+    <!-- Output card 5 (core values) -->
+    <g filter="url(#shadow)">
+      <rect x="1280" y="55" width="240" height="110" rx="14" fill="#131830" stroke="#00e5ff" stroke-width="1" opacity="0.7"/>
+      <text x="1400" y="80" font-family="'SF Pro Display','PingFang SC',sans-serif" font-size="13" font-weight="700" text-anchor="middle" fill="#00e5ff" letter-spacing="2">核心价值</text>
+      <text x="1400" y="103" font-family="'PingFang SC',sans-serif" font-size="12" text-anchor="middle" fill="#8e99b0">🚀 自动化 — 一键运行</text>
+      <text x="1400" y="121" font-family="'PingFang SC',sans-serif" font-size="12" text-anchor="middle" fill="#8e99b0">🧠 智能化 — 精准识别</text>
+      <text x="1400" y="139" font-family="'PingFang SC',sans-serif" font-size="12" text-anchor="middle" fill="#8e99b0">🌍 多语言 — 中英字幕</text>
+      <text x="1400" y="157" font-family="'PingFang SC',sans-serif" font-size="12" text-anchor="middle" fill="#8e99b0">⚡ 高效率 — 快速处理</text>
+    </g>
+  </g>
+
+  <!-- ====== PLATFORM BADGES (bottom strip) ====== -->
+  <g transform="translate(0, 440)">
+    <line x1="80" y1="10" x2="1520" y2="10" stroke="#7c4dff" stroke-width="0.5" opacity="0.3"/>
+    <text x="800" y="35" font-family="'SF Pro Display','PingFang SC',sans-serif" font-size="13" text-anchor="middle" fill="#7c4dff" letter-spacing="3" opacity="0.6">支 持 平 台</text>
+
+    <!-- YouTube -->
+    <rect x="500" y="48" width="120" height="32" rx="16" fill="#ff0000" opacity="0.2" stroke="#ff0000" stroke-width="1"/>
+    <text x="560" y="69" font-family="'SF Pro Display',sans-serif" font-size="12" font-weight="600" text-anchor="middle" fill="#ff4444">▶ YouTube</text>
+
+    <!-- TikTok -->
+    <rect x="650" y="48" width="120" height="32" rx="16" fill="#00f2ea" opacity="0.15" stroke="#00f2ea" stroke-width="1"/>
+    <text x="710" y="69" font-family="'SF Pro Display',sans-serif" font-size="12" font-weight="600" text-anchor="middle" fill="#00f2ea">♪ TikTok</text>
+
+    <!-- Twitter -->
+    <rect x="800" y="48" width="120" height="32" rx="16" fill="#1da1f2" opacity="0.2" stroke="#1da1f2" stroke-width="1"/>
+    <text x="860" y="69" font-family="'SF Pro Display',sans-serif" font-size="12" font-weight="600" text-anchor="middle" fill="#1da1f2">𝕏 Twitter</text>
+
+    <!-- More -->
+    <rect x="950" y="48" width="100" height="32" rx="16" fill="#888" opacity="0.1" stroke="#666" stroke-width="1"/>
+    <text x="1000" y="69" font-family="'SF Pro Display',sans-serif" font-size="12" font-weight="600" text-anchor="middle" fill="#666">+ 更多</text>
+  </g>
+
+  <!-- Version tag -->
+  <text x="1560" y="510" font-family="monospace" font-size="9" text-anchor="end" fill="#333" opacity="0.4">v1.0 · 2026.03</text>
+</svg>

@@ -1,0 +1,19 @@
+[run]
+omit =
+    */venv/*
+    */tests/*
+    */__pycache__/*
+    verify_*.py
+    test_*.py
+    test_*.py.bak
+    main.py
+    embed_subtitles.py
+    config.py
+
+[report]
+exclude_lines =
+    pragma: no cover
+    def __repr__
+    raise AssertionError
+    raise NotImplementedError
+    if __name__ == .__main__.:

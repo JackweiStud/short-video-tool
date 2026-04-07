@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  lint:
+    name: Code Quality Check
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install ruff black
+    
+    - name: Check code formatting with black
+      run: |
+        black --check --diff .
+      continue-on-error: true
+    
+    - name: Lint with ruff
+      run: |
+        ruff check .
+      continue-on-error: true
+
+  test:
+    name: Test Suite
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ffmpeg
+    
+    - name: Install Python dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest pytest-cov
+    
+    - name: Run pytest with coverage
+      run: |
+        pytest tests/ --cov=. --cov-config=.coveragerc --cov-report=xml --cov-report=term-missing -v
+      continue-on-error: true
+
+    - name: Check imports
+      run: |
+        python -c "from downloader import Downloader; print('✓ downloader')"
+        python -c "from analyzer import Analyzer; print('✓ analyzer')"
+        python -c "from clipper import Clipper; print('✓ clipper')"
+        python -c "from translator import Translator; print('✓ translator')"
+        python -c "from integrator import Integrator; print('✓ integrator')"
+        echo "All core modules can be imported successfully"
+
+  dependency-check:
+    name: Dependency Security Check
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install safety
+    
+    - name: Check for known vulnerabilities
+      run: |
+        safety check --file requirements.txt || true
+      continue-on-error: true

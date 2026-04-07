@@ -1,0 +1,33 @@
+# Video Download
+yt-dlp==2026.3.13
+
+# Audio/Video Processing
+librosa==0.11.0
+opencv-python==4.13.0.92
+scenedetect==0.6.7.1
+
+# Scientific Computing
+numpy==2.4.3
+scipy==1.17.1
+
+# Translation
+deep-translator==1.11.4
+beautifulsoup4==4.14.3
+
+# OpenAI (optional, for GPT translation)
+openai==2.28.0
+
+# HTTP Requests
+requests>=2.23.0
+
+# Other Dependencies
+certifi>=2017.4.17
+
+# Subtitle Rendering
+moviepy>=1.0.3
+imageio-ffmpeg>=0.4.9
+Pillow>=10.0.0
+pyobjc-framework-Vision>=12.0
+
+faster-whisper
+openai-whisper
