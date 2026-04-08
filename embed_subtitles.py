@@ -190,16 +190,19 @@ def _estimate_hard_subtitle_mask(
 
     horizontal_padding = max(16, round(video_width * (0.04 if is_vertical_video else 0.03)))
     vertical_padding = max(10, round(video_height * (0.014 if is_vertical_video else 0.012)))
-    content_width = _pick_percentile(candidate_widths, 0.75, int(video_width * 0.5))
+    content_width = _pick_percentile(candidate_widths, 0.68, int(video_width * 0.46))
     mask_width = min(
         int(video_width * (0.86 if is_vertical_video else 0.78)),
-        max(int(video_width * (0.40 if is_vertical_video else 0.30)), content_width + horizontal_padding * 2),
+        max(
+            int(video_width * (0.40 if is_vertical_video else 0.30)),
+            content_width + horizontal_padding * 2,
+        ),
     )
     x = max(0, (video_width - mask_width) // 2)
 
     content_height = _pick_percentile(
         candidate_heights,
-        0.75,
+        0.68,
         round(en_fontsize * 1.35 + zh_fontsize * 1.35 + inter_gap),
     )
     if content_height <= 0:
@@ -209,6 +212,11 @@ def _estimate_hard_subtitle_mask(
         max(round(video_height * (0.08 if is_vertical_video else 0.07)), content_height + vertical_padding * 2),
     )
 
+    shortest_side = max(1, min(mask_width, mask_height))
+    radius_scale = 0.42 if is_vertical_video else 0.38
+    radius_px = max(14, round(shortest_side * radius_scale))
+    feather_px = max(2, round(radius_px * 0.18))
+
     y = max(0, int(subtitle_boundary * video_height) - padding_px)
     y = min(y, video_height - mask_height - max(4, round(video_height * 0.006)))
 
@@ -217,6 +225,8 @@ def _estimate_hard_subtitle_mask(
         "y": y,
         "w": mask_width,
         "h": mask_height,
+        "radius_px": radius_px,
+        "feather_px": feather_px,
         "padding_px": padding_px,
     }
 
@@ -376,6 +386,84 @@ def _escape_drawtext(text: str) -> str:
     text = text.replace(":", "\\:")
     text = text.replace("%", "%%")
     return text
+
+
+def _parse_ffmpeg_color_to_rgba(color: str) -> tuple[int, int, int, int]:
+    """Parse a small subset of ffmpeg color strings into RGBA."""
+    text = str(color or "").strip().lower()
+    alpha = 255
+
+    if "@" in text:
+        base, alpha_text = text.split("@", 1)
+        text = base.strip()
+        try:
+            alpha_value = float(alpha_text.strip())
+            alpha = int(round(alpha_value * 255)) if alpha_value <= 1 else int(round(alpha_value))
+        except Exception:
+            alpha = 255
+
+    named_colors = {
+        "black": (0, 0, 0),
+        "white": (255, 255, 255),
+        "red": (255, 0, 0),
+        "green": (0, 255, 0),
+        "blue": (0, 0, 255),
+        "yellow": (255, 255, 0),
+    }
+    if text in named_colors:
+        r, g, b = named_colors[text]
+    elif text.startswith("#") and len(text) in {4, 7}:
+        hex_text = text[1:]
+        if len(hex_text) == 3:
+            r, g, b = (int(ch * 2, 16) for ch in hex_text)
+        else:
+            r = int(hex_text[0:2], 16)
+            g = int(hex_text[2:4], 16)
+            b = int(hex_text[4:6], 16)
+    elif text.startswith("0x") and len(text) == 8:
+        hex_text = text[2:]
+        r = int(hex_text[0:2], 16)
+        g = int(hex_text[2:4], 16)
+        b = int(hex_text[4:6], 16)
+    else:
+        r, g, b = (0, 0, 0)
+
+    return r, g, b, max(0, min(255, alpha))
+
+
+def _build_hard_subtitle_mask_overlay_image(
+    video_width: int,
+    video_height: int,
+    hard_subtitle_mask: Dict[str, Any],
+    color: str,
+) -> "Image.Image":
+    """Build a rounded, softly feathered overlay image for hard-subtitle masking."""
+    from PIL import Image, ImageDraw, ImageFilter
+
+    mask_x = int(hard_subtitle_mask["x"])
+    mask_y = int(hard_subtitle_mask["y"])
+    mask_w = int(hard_subtitle_mask["w"])
+    mask_h = int(hard_subtitle_mask["h"])
+    radius_px = int(hard_subtitle_mask.get("radius_px", 0))
+    feather_px = int(hard_subtitle_mask.get("feather_px", 0))
+
+    radius_px = max(4, min(radius_px, max(4, min(mask_w, mask_h) // 2 - 1)))
+    feather_px = max(0, feather_px)
+
+    overlay = Image.new("RGBA", (video_width, video_height), (0, 0, 0, 0))
+    alpha_mask = Image.new("L", (mask_w, mask_h), 0)
+    draw = ImageDraw.Draw(alpha_mask)
+    draw.rounded_rectangle(
+        (0, 0, mask_w - 1, mask_h - 1),
+        radius=radius_px,
+        fill=255,
+    )
+    if feather_px > 0:
+        alpha_mask = alpha_mask.filter(ImageFilter.GaussianBlur(radius=feather_px))
+
+    fill = Image.new("RGBA", (mask_w, mask_h), _parse_ffmpeg_color_to_rgba(color))
+    overlay.paste(fill, (mask_x, mask_y), alpha_mask)
+    return overlay
 
 
 # ──────────────────────────────────────────────
@@ -1407,20 +1495,34 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     en_filter = f"ass={esc(en_ass_path)}"
     zh_filter = f"ass={esc(zh_ass_path)}"
 
-    filters = []
+    overlay_path = None
     if hard_subtitle_mask:
         mask_x = int(hard_subtitle_mask["x"])
         mask_y = int(hard_subtitle_mask["y"])
         mask_w = int(hard_subtitle_mask["w"])
         mask_h = int(hard_subtitle_mask["h"])
+        mask_radius = int(hard_subtitle_mask.get("radius_px", 0))
+        mask_feather = int(hard_subtitle_mask.get("feather_px", 0))
         mask_color = hard_subtitle_mask.get("color", config.subtitle_hard_mask_color)
-        filters.append(f"drawbox=x={mask_x}:y={mask_y}:w={mask_w}:h={mask_h}:color={mask_color}:t=fill")
+        import tempfile
+        overlay_image = _build_hard_subtitle_mask_overlay_image(
+            video_width=video_w,
+            video_height=video_h,
+            hard_subtitle_mask=hard_subtitle_mask,
+            color=mask_color,
+        )
+        overlay_tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        overlay_path = overlay_tmp.name
+        overlay_tmp.close()
+        overlay_image.save(overlay_path)
         logging.info(
-            "  Applying hard-subtitle mask: x=%d y=%d w=%d h=%d color=%s.",
+            "  Applying rounded hard-subtitle mask: x=%d y=%d w=%d h=%d radius=%d feather=%d color=%s.",
             mask_x,
             mask_y,
             mask_w,
             mask_h,
+            mask_radius,
+            mask_feather,
             mask_color,
         )
 
@@ -1440,8 +1542,10 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             en_pos_override[1] if en_pos_override else "n/a",
         )
     else:
-        filters.extend([en_filter, zh_filter])
-        vf = ",".join(filters)
+        if hard_subtitle_mask:
+            vf = f"[0:v][1:v]overlay=0:0,{en_filter},{zh_filter}[v]"
+        else:
+            vf = ",".join([en_filter, zh_filter])
         if hard_subtitle_mask:
             logging.info(
                 "  Hard subtitle replacement mode: burning unified EN+ZH dual subtitles inside mask "
@@ -1457,14 +1561,27 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     except Exception:
         ffmpeg_exe = "ffmpeg"
 
-    cmd = [
-        ffmpeg_exe, "-y",
-        "-i", video_path,
-        "-vf", vf,
-        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-        "-c:a", "copy",
-        output_path
-    ]
+    if hard_subtitle_mask and overlay_path:
+        cmd = [
+            ffmpeg_exe, "-y",
+            "-i", video_path,
+            "-i", overlay_path,
+            "-filter_complex", vf,
+            "-map", "[v]",
+            "-map", "0:a?",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+            "-c:a", "copy",
+            output_path
+        ]
+    else:
+        cmd = [
+            ffmpeg_exe, "-y",
+            "-i", video_path,
+            "-vf", vf,
+            "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+            "-c:a", "copy",
+            output_path
+        ]
 
     try:
         result = subprocess.run(
@@ -1484,6 +1601,12 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     except Exception as e:
         logging.debug(f"[FFmpeg subtitles] Exception: {e}")
         return False
+    finally:
+        if overlay_path and os.path.exists(overlay_path):
+            try:
+                os.unlink(overlay_path)
+            except Exception:
+                pass
 
 
 def _hard_burn_bilingual(video_path: str, en_srt_path: str, zh_srt_path: str,
@@ -1539,23 +1662,29 @@ def _hard_burn_bilingual(video_path: str, en_srt_path: str, zh_srt_path: str,
         max_len = max(len(en_entries), len(zh_entries))
         subtitle_clips = []
         if hard_subtitle_mask:
-            from PIL import Image
             import numpy as np
             mask_x = int(hard_subtitle_mask["x"])
             mask_y = int(hard_subtitle_mask["y"])
             mask_w = int(hard_subtitle_mask["w"])
             mask_h = int(hard_subtitle_mask["h"])
+            mask_radius = int(hard_subtitle_mask.get("radius_px", 0))
+            mask_feather = int(hard_subtitle_mask.get("feather_px", 0))
             logging.info(
-                "  Applying hard-subtitle mask in moviepy fallback: x=%d y=%d w=%d h=%d.",
+                "  Applying rounded hard-subtitle mask in moviepy fallback: x=%d y=%d w=%d h=%d radius=%d feather=%d.",
                 mask_x,
                 mask_y,
                 mask_w,
                 mask_h,
+                mask_radius,
+                mask_feather,
             )
-            mask_rgba = tuple(int(round(c)) for c in (0, 0, 0, 255))
-            mask_img = Image.new('RGBA', (w, h), (0, 0, 0, 0))
-            mask = Image.new('RGBA', (mask_w, mask_h), mask_rgba)
-            mask_img.paste(mask, (mask_x, mask_y))
+            mask_color = hard_subtitle_mask.get("color", config.subtitle_hard_mask_color)
+            mask_img = _build_hard_subtitle_mask_overlay_image(
+                video_width=w,
+                video_height=h,
+                hard_subtitle_mask=hard_subtitle_mask,
+                color=mask_color,
+            )
             mask_clip = (
                 ImageClip(np.array(mask_img), transparent=True)
                 .with_start(0)

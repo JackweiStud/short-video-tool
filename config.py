@@ -347,12 +347,12 @@ class Config:
     """垂直视频 (9:16) 中文字幕最大字符数"""
 
     max_en_chars_horizontal: int = field(
-        default_factory=lambda: int(os.getenv("MAX_EN_CHARS_HORIZONTAL", "50"))
+        default_factory=lambda: int(os.getenv("MAX_EN_CHARS_HORIZONTAL", "65"))
     )
     """水平视频 (16:9) 英文字幕最大字符数"""
 
     max_zh_chars_horizontal: int = field(
-        default_factory=lambda: int(os.getenv("MAX_ZH_CHARS_HORIZONTAL", "35"))
+        default_factory=lambda: int(os.getenv("MAX_ZH_CHARS_HORIZONTAL", "45"))
     )
     """水平视频 (16:9) 中文字幕最大字符数"""
 
@@ -423,7 +423,7 @@ class Config:
     """竖屏视频中，遮挡原硬字幕区域时在检测边界之上额外保留的纯色遮罩高度（像素，基于 1920p 基线）"""
 
     subtitle_hard_mask_color: str = field(
-        default_factory=lambda: os.getenv("SUBTITLE_HARD_MASK_COLOR", "black@0.95")
+        default_factory=lambda: os.getenv("SUBTITLE_HARD_MASK_COLOR", "black@0.9")
     )
     """硬字幕替换模式下的纯色遮罩颜色，供 FFmpeg drawbox 使用"""
 

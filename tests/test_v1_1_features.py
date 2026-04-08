@@ -8,6 +8,7 @@ Test suite for new features introduced in version 1.1.0:
 import os
 import json
 import pytest
+import numpy as np
 from unittest.mock import MagicMock, patch
 import embed_subtitles
 from subtitle_sync import SubtitleSync
@@ -87,6 +88,32 @@ class TestDimensionScaling:
         extra_lift = layout["margin_v_zh"] - hard_sub_bottom_margin
         assert extra_lift <= 30
         assert layout["inter_gap"] <= 8
+
+    def test_hard_subtitle_mask_overlay_has_soft_rounded_edges(self):
+        """Mask overlay should render rounded corners with feathered alpha edges."""
+        mask = {
+            "x": 12,
+            "y": 24,
+            "w": 120,
+            "h": 48,
+            "radius_px": 12,
+            "feather_px": 2,
+        }
+        img = embed_subtitles._build_hard_subtitle_mask_overlay_image(
+            video_width=320,
+            video_height=180,
+            hard_subtitle_mask=mask,
+            color="black@0.95",
+        )
+        arr = np.array(img)
+
+        center_alpha = arr[24 + 24, 12 + 60, 3]
+        corner_alpha = arr[24, 12, 3]
+        outside_alpha = arr[0, 0, 3]
+
+        assert center_alpha > 200
+        assert corner_alpha < center_alpha
+        assert outside_alpha == 0
 
 class TestCLIPSelection:
     """Test precision mode for processing only current clips."""
