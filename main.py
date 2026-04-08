@@ -9,7 +9,7 @@ Short Video Tool - 短视频一键处理工具
 用法:
     python main.py --url <视频URL>                      # 基础：下载并处理
     python main.py --local-file <本地视频路径>           # 跳过下载，直接处理本地文件
-    python main.py --summary-only --url <视频URL>       # 仅 ASR + LLM 总结，输出 video_summary.md
+    python main.py --summary-only --url <视频URL>       # 仅 ASR + LLM 总结，输出到 summary/<视频名>_video_summary.md
     python main.py --summary --url <视频URL>            # 正常流程结束后额外生成视频总结
 
 视频源参数（二选一，必须提供其中之一）:
@@ -592,9 +592,10 @@ def main():
                 logging.error("Failed to generate summary-only analysis")
                 return 1
 
+            summary_output_dir = os.path.join(args.output, "summary")
             summary_path = analyzer.generate_video_summary(
                 analysis_result=summary_analysis_result,
-                output_dir=args.output,
+                output_dir=summary_output_dir,
                 video_path=video_path,
             )
             if not summary_path:
@@ -790,13 +791,15 @@ def main():
             else:
                 logging.warning("⚠️ Failed to embed subtitles")
 
+        summary_path = None
         if args.summary:
             logging.info("\n" + "=" * 70)
             logging.info("Optional: Generating video summary...")
             logging.info("=" * 70)
+            summary_output_dir = os.path.join(args.output, "summary")
             summary_path = analyzer.generate_video_summary(
                 analysis_result=analysis_result,
-                output_dir=args.output,
+                output_dir=summary_output_dir,
                 video_path=video_path,
             )
             if summary_path:
@@ -814,8 +817,8 @@ def main():
         logging.info(f"Total time: {total_time:.2f} seconds")
         logging.info(f"Output directory: {args.output}/")
         logging.info(f"Summary report: {args.output}/summary.md")
-        if args.summary:
-            logging.info(f"Video summary: {args.output}/video_summary.md")
+        if summary_path:
+            logging.info(f"Video summary: {summary_path}")
         logging.info(f"Log file: {config.log_file}")
 
         return 0

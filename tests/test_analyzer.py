@@ -157,10 +157,13 @@ class TestAnalyzerFunctionality:
             "title": "测试视频总结",
             "one_sentence_summary": "这是一个示例视频的核心总结。",
             "core_points": ["核心观点一", "核心观点二", "核心观点三"],
+            "evidence_points": ["明确依据一", "明确依据二"],
             "insights": ["启示一", "启示二", "启示三"],
             "actionable_takeaways": ["建议一", "建议二", "建议三"],
+            "caveats": ["边界一", "边界二"],
             "best_for": ["产品经理", "内容创作者"],
             "keywords": ["AI", "总结", "视频"],
+            "x_post_copy": "Sam Altman 把创业讲得很直接：好想法、好产品、好团队、好执行。更重要的是，真正值得做的公司，往往一开始并不被看好。如果你在想怎么判断一个创意值不值得做，这支视频值得看。",
         }
 
         def fake_post(*args, **kwargs):
@@ -189,6 +192,7 @@ class TestAnalyzerFunctionality:
         )
 
         assert summary_path is not None
+        assert Path(summary_path).name == "demo_video_summary.md"
         assert os.path.exists(summary_path)
         with open(summary_path, "r", encoding="utf-8") as f:
             content = f.read()
@@ -196,4 +200,9 @@ class TestAnalyzerFunctionality:
         assert "# 测试视频总结" in content
         assert "## 一句话概括" in content
         assert "这是一个示例视频的核心总结。" in content
+        assert "## 关键依据" in content
+        assert "明确依据一" in content
         assert "## 对用户的启示与价值" in content
+        assert "## 适用边界" in content
+        assert "## X Post 文案" in content
+        assert "Sam Altman 把创业讲得很直接" in content

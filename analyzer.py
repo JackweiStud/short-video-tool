@@ -6,7 +6,9 @@ import subprocess
 import time
 import hashlib
 import math
+import re
 import shutil
+from datetime import datetime
 from multiprocessing import Queue, set_start_method
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -473,7 +475,9 @@ class Analyzer:
         if not summary_data:
             return None
 
-        summary_path = os.path.join(output_dir, "video_summary.md")
+        summary_path = os.path.join(
+            output_dir, self._build_video_summary_filename(video_path)
+        )
         with open(summary_path, "w", encoding="utf-8") as f:
             f.write(
                 self._render_video_summary_markdown(
@@ -485,6 +489,49 @@ class Analyzer:
 
         logging.info(f"Video summary saved to: {summary_path}")
         return summary_path
+
+    @staticmethod
+    def _build_video_summary_filename(video_path: Optional[str]) -> str:
+        """Build a stable summary filename prefixed by the source video stem."""
+        if not video_path:
+            return "video_summary.md"
+
+        stem = Path(video_path).stem.strip() or "video"
+        sanitized = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("._")
+        if not sanitized:
+            sanitized = "video"
+        return f"{sanitized}_video_summary.md"
+
+    @staticmethod
+    def _filter_video_summary_best_for(items: list, transcript: str) -> list:
+        """Drop unsupported audience labels that are too generic or age-based."""
+        if not items:
+            return []
+
+        transcript_lower = (transcript or "").lower()
+        banned_terms = [
+            "年轻人",
+            "年轻创业者",
+            "普通人",
+            "上班族",
+            "宝妈",
+            "学生党",
+        ]
+        filtered = []
+        for item in items:
+            text = str(item).strip()
+            if not text:
+                continue
+            if any(term in text for term in banned_terms):
+                matched = False
+                for term in banned_terms:
+                    if term in text and term.lower() in transcript_lower:
+                        matched = True
+                        break
+                if not matched:
+                    continue
+            filtered.append(text)
+        return filtered
 
     def _resolve_analysis_plan(self, clip_strategy: str) -> Tuple[bool, bool, bool]:
         """Return (audio_analysis, scene_detection, topic_segmentation) flags."""
@@ -2678,18 +2725,76 @@ Additional opinion guidance:
         audio_climax_points = analysis_result.get("audio_climax_points", [])
         scene_changes = analysis_result.get("scene_changes", [])
 
+        compact_topic_summaries = []
+        if isinstance(topic_summaries, list):
+            for item in topic_summaries[:8]:
+                if not isinstance(item, dict):
+                    continue
+                compact_topic_summaries.append(
+                    {
+                        "topic": str(item.get("topic", "")).strip(),
+                        "summary": str(item.get("summary", "")).strip(),
+                    }
+                )
+
+        compact_topic_segments = []
+        if isinstance(topic_segments, list):
+            for item in topic_segments[:8]:
+                if not isinstance(item, dict):
+                    continue
+                compact_topic_segments.append(
+                    {
+                        "start": round(float(item.get("start", 0.0)), 1),
+                        "end": round(float(item.get("end", 0.0)), 1),
+                        "topic": str(item.get("topic", "")).strip(),
+                        "summary": str(item.get("summary", "")).strip(),
+                    }
+                )
+
+        compact_audio_climax_points = []
+        if isinstance(audio_climax_points, list):
+            for item in audio_climax_points[:6]:
+                if not isinstance(item, dict):
+                    continue
+                compact_audio_climax_points.append(
+                    {
+                        "time": round(float(item.get("time", 0.0)), 1),
+                        "score": round(float(item.get("score", 0.0)), 3),
+                    }
+                )
+
+        compact_scene_changes = []
+        if isinstance(scene_changes, list):
+            for item in scene_changes[:12]:
+                try:
+                    compact_scene_changes.append(round(float(item), 1))
+                except (TypeError, ValueError):
+                    continue
+
         return f"""你是一名擅长把视频内容提炼成高密度中文总结的助手。
 
-请基于下面的 ASR 文本和已有分析信息，生成一个适合直接写入 Markdown 的视频总结内容。
+任务：
+基于提供的 transcript 和结构化分析信息，输出一个可被程序渲染为 Markdown 的严格 JSON 总结。
 
 要求：
-- 输出必须是严格 JSON，不要输出 Markdown，不要输出额外解释
+- 只输出严格 JSON，不要输出 Markdown，不要输出额外解释
 - 用中文写作，面向希望高效理解视频核心内容的读者
-- 不要复述整段字幕，要提炼主线、结论、方法、启示和价值
+- 所有结论都必须以 transcript 或提供的结构化信息为依据，不要脑补
+- 不要复述整段字幕，要提炼主线、结论、方法、启示、价值和适用边界
 - 如果内容偏知识/教程，强调方法、步骤、注意事项和实践价值
-- 如果内容偏观点/评论，强调核心立场、论据、反方可能的疑问和适用边界
-- 如果存在 topic_summaries 或 topic_segments，请把它们当作结构线索
-- 如果 transcript 已截断，请优先保留最能代表核心内容的部分
+- 如果内容偏观点/评论，强调核心立场、主要论据和适用边界
+- 如果存在 topic_summaries 或 topic_segments，可以把它们当作结构线索，但不能替代 transcript
+- audio_climax_points 和 scene_changes 只作弱参考，不要据此推断语义重点
+- 如果 transcript 已截断，只能基于现有内容总结，不要假设视频全貌
+- 如果某类信息证据不足，可以少写，但不要编造
+- `best_for` 只能写 transcript 能支持的人群或场景，不要补充无依据的人物画像
+- `best_for` 优先写“适合什么问题/场景的人看”，不要写“年轻人”“普通人”“上班族”这类泛化标签，除非 transcript 明确提到
+- `actionable_takeaways` 必须来自 transcript 中明确出现的方法、判断标准、原则或建议
+- `core_points` 必须写成“视频真正展开过的关键判断或方法”，不要写目录式标题
+- `evidence_points` 应提炼 2-4 条视频里明确表达过的关键判断、标准、例子或论据，不要写空泛套话
+- `caveats` 用于总结这套观点成立的前提、边界或未覆盖的问题；如果证据不足可以为空数组
+- `x_post_copy` 用一小段可直接发到 X 的中文文案总结这支视频，要求有吸引力但不标题党，不要编造，不要使用 emoji，不要堆砌 hashtags
+- 如果视频里没有足够证据支持“启示”或“建议”，宁可少写，也不要用通用创业鸡汤或常识性废话补齐
 
 视频文件名: {video_name}
 ASR 段数: {len(asr_result)}
@@ -2700,30 +2805,38 @@ ASR 段数: {len(asr_result)}
 Transcript 是否截断: {"yes" if transcript_truncated else "no"}
 
 可参考的结构信息：
-主题摘要: {json.dumps(topic_summaries, ensure_ascii=False)}
-主题分段: {json.dumps(topic_segments, ensure_ascii=False)}
-音频高潮点: {json.dumps(audio_climax_points, ensure_ascii=False)}
-场景切换点: {json.dumps(scene_changes, ensure_ascii=False)}
+主题摘要: {json.dumps(compact_topic_summaries, ensure_ascii=False)}
+主题分段: {json.dumps(compact_topic_segments, ensure_ascii=False)}
+音频高潮点: {json.dumps(compact_audio_climax_points, ensure_ascii=False)}
+场景切换点: {json.dumps(compact_scene_changes, ensure_ascii=False)}
 
 Transcript:
 {transcript}
 
 请返回以下 JSON 结构：
 {{
-  "title": "简洁、准确、有吸引力的标题",
+  "title": "准确、克制、不标题党的标题",
   "one_sentence_summary": "一句话概括视频核心内容",
   "core_points": ["核心观点1", "核心观点2", "核心观点3"],
+  "evidence_points": ["视频里明确提到的依据1", "视频里明确提到的依据2"],
   "insights": ["对用户的启示1", "对用户的启示2", "对用户的启示3"],
   "actionable_takeaways": ["可执行建议1", "可执行建议2", "可执行建议3"],
+  "caveats": ["适用边界1", "适用边界2"],
   "best_for": ["适合的人群1", "适合的人群2"],
-  "keywords": ["关键词1", "关键词2", "关键词3"]
+  "keywords": ["关键词1", "关键词2", "关键词3"],
+  "x_post_copy": "一段可直接发布到 X 的中文短文，和一段对应的地道美式英文翻译"
 }}
 
 规则：
-- core_points / insights / actionable_takeaways 至少各 3 条
-- best_for 至少 2 条
+- core_points 2-5 条，优先写最关键的内容
+- evidence_points 2-4 条，尽量具体，优先写视频中真实展开过的判断、标准、例子或论据
+- insights 1-4 条；如果证据不足，不要强行凑数
+- actionable_takeaways 1-4 条；如果视频缺少明确方法论，不要编造建议
+- caveats 0-3 条；没有明确边界信息时可以为空数组
+- best_for 1-3 条；只能写视频内容直接支持的受众或使用场景，不要猜年龄、身份阶段或职业画像
 - keywords 3-8 个
-- title 不要过长
+- x_post_copy 1 段，建议 80-180 字，像一条真人会发的高质量 X 帖子；要有信息密度和传播性，但不能夸张失真
+- title 不要过长，不要夸张，不要营销腔
 - 只输出 JSON
 """
 
@@ -2749,8 +2862,8 @@ Transcript:
         )
 
         system_prompt = (
-            "你是一个严谨的视频总结助手。"
-            "你必须只返回严格 JSON，且内容要适合直接渲染为中文 Markdown。"
+            "你是一个严谨、克制、重证据的视频总结助手。"
+            "你必须只返回严格 JSON，避免夸张、营销腔和无依据推断。"
         )
         payload = {
             "model": self.llm_model,
@@ -2758,8 +2871,8 @@ Transcript:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt},
             ],
-            "temperature": 0.2,
-            "max_tokens": 2048,
+            "temperature": 0.3,
+            "max_tokens": 16000,
         }
         headers = {
             "Authorization": f"Bearer {api_key}",
@@ -2823,6 +2936,11 @@ Transcript:
                 for item in parsed.get("core_points", [])
                 if str(item).strip()
             ],
+            "evidence_points": [
+                str(item).strip()
+                for item in parsed.get("evidence_points", [])
+                if str(item).strip()
+            ],
             "insights": [
                 str(item).strip()
                 for item in parsed.get("insights", [])
@@ -2833,9 +2951,16 @@ Transcript:
                 for item in parsed.get("actionable_takeaways", [])
                 if str(item).strip()
             ],
+            "caveats": [
+                str(item).strip()
+                for item in parsed.get("caveats", [])
+                if str(item).strip()
+            ],
             "best_for": [
                 str(item).strip()
-                for item in parsed.get("best_for", [])
+                for item in self._filter_video_summary_best_for(
+                    parsed.get("best_for", []), transcript
+                )
                 if str(item).strip()
             ],
             "keywords": [
@@ -2843,6 +2968,7 @@ Transcript:
                 for item in parsed.get("keywords", [])
                 if str(item).strip()
             ],
+            "x_post_copy": str(parsed.get("x_post_copy", "")).strip(),
         }
 
     def _render_video_summary_markdown(
@@ -2875,6 +3001,10 @@ Transcript:
             "",
             _bullets(summary_data.get("core_points", [])),
             "",
+            "## 关键依据",
+            "",
+            _bullets(summary_data.get("evidence_points", [])),
+            "",
             "## 对用户的启示与价值",
             "",
             _bullets(summary_data.get("insights", [])),
@@ -2882,6 +3012,10 @@ Transcript:
             "## 可执行建议",
             "",
             _bullets(summary_data.get("actionable_takeaways", [])),
+            "",
+            "## 适用边界",
+            "",
+            _bullets(summary_data.get("caveats", [])),
             "",
             "## 适合谁看",
             "",
@@ -2906,6 +3040,15 @@ Transcript:
                 summary = str(item.get("summary", "")).strip()
                 if topic or summary:
                     md.append(f"{idx}. {topic or '主题'} - {summary or '无'}")
+
+        md.extend(
+            [
+                "",
+                "## X Post 文案",
+                "",
+                summary_data.get("x_post_copy", "").strip() or "暂无",
+            ]
+        )
 
         return "\n".join(md).strip() + "\n"
 
