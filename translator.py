@@ -732,9 +732,9 @@ Keep the same numbering format. Only output the translated texts, no explanation
 
             total_chunks = len(chunks)
 
-            # Determine concurrency based on CPU count and API limits
-            # Reduced to 3 workers for better API stability (avoid rate limits/timeouts)
-            max_workers = min(3, os.cpu_count() or 2)
+            # Determine concurrency based on CPU count and API limits.
+            # Default to 6 workers to improve throughput on larger subtitle batches.
+            max_workers = min(6, os.cpu_count() or 4)
 
             logging.info(
                 f"[Siliconflow] Processing {total_chunks} chunks with {max_workers} concurrent workers"
