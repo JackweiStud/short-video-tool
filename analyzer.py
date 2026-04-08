@@ -367,6 +367,125 @@ class Analyzer:
 
         return analysis_result
 
+    def analyze_video_for_summary(
+        self, video_path: str, output_dir: Optional[str] = None
+    ) -> dict:
+        """
+        Minimal analysis pipeline for summary generation.
+        Only extracts audio and runs ASR; skips audio feature analysis, scene
+        detection, clipping, translation, and integration.
+        """
+        output_dir = output_dir or self.default_output_dir
+
+        logging.info(f"Starting summary-only analysis for video: {video_path}")
+
+        if not os.path.exists(video_path):
+            logging.error(f"Video file not found: {video_path}")
+            return None
+
+        if not os.access(video_path, os.R_OK):
+            logging.error(f"Video file is not readable: {video_path}")
+            return None
+
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except Exception as e:
+            logging.error(f"Failed to create output directory: {e}")
+            return None
+
+        audio_path = self._extract_audio(video_path, output_dir)
+        if not audio_path:
+            logging.error("Failed to extract audio from video")
+            return None
+
+        if not os.path.exists(audio_path) or os.path.getsize(audio_path) == 0:
+            logging.error("Extracted audio file is empty or missing")
+            return None
+
+        logging.info("Running ASR for summary-only mode...")
+        asr_result = self._run_asr(
+            audio_path,
+            model=self.whisper_model,
+            language=self.asr_language,
+            cache_source_path=video_path,
+        )
+        if not asr_result:
+            logging.error("Failed to generate ASR result for summary-only mode")
+            return None
+
+        analysis_result = {
+            "video_path": video_path,
+            "asr_result": asr_result,
+            "audio_climax_points": [],
+            "scene_changes": [],
+            "topic_segments": [],
+            "topic_summaries": [],
+            "segmentation_meta": {
+                "clip_strategy_used": "summary-only",
+                "segmentation_effective": False,
+                "fallback_reason": "summary_only_mode",
+            },
+        }
+
+        output_file = os.path.join(output_dir, "analysis_result.json")
+        with open(output_file, "w", encoding="utf-8") as f:
+            json.dump(analysis_result, f, ensure_ascii=False, indent=2)
+        logging.info(f"Summary-only analysis saved to: {output_file}")
+
+        return analysis_result
+
+    def generate_video_summary(
+        self,
+        analysis_result: dict,
+        output_dir: Optional[str] = None,
+        video_path: Optional[str] = None,
+    ) -> Optional[str]:
+        """
+        Generate a human-readable Markdown summary for one video.
+        """
+        output_dir = output_dir or self.default_output_dir
+        os.makedirs(output_dir, exist_ok=True)
+
+        if not analysis_result:
+            logging.error("No analysis result available for video summary")
+            return None
+
+        asr_result = analysis_result.get("asr_result", [])
+        if not asr_result:
+            logging.error("No ASR result available for video summary")
+            return None
+
+        api_key = self.llm_api_key or getattr(self.config, "openai_api_key", None)
+        if not api_key:
+            logging.error("LLM API key not configured; cannot generate video summary")
+            return None
+
+        base_url = self.llm_base_url or "https://api.openai.com/v1"
+        video_path = video_path or analysis_result.get("video_path", "")
+        video_name = os.path.basename(video_path) if video_path else "video"
+
+        summary_data = self._build_video_summary_data(
+            analysis_result=analysis_result,
+            api_key=api_key,
+            base_url=base_url,
+            video_name=video_name,
+        )
+        if not summary_data:
+            return None
+
+        summary_path = os.path.join(output_dir, "video_summary.md")
+        with open(summary_path, "w", encoding="utf-8") as f:
+            f.write(
+                self._render_video_summary_markdown(
+                    summary_data=summary_data,
+                    analysis_result=analysis_result,
+                    video_name=video_name,
+                )
+            )
+
+        logging.info(f"Video summary saved to: {summary_path}")
+        return summary_path
+
     def _resolve_analysis_plan(self, clip_strategy: str) -> Tuple[bool, bool, bool]:
         """Return (audio_analysis, scene_detection, topic_segmentation) flags."""
         strategy = (clip_strategy or "opinion").lower()
@@ -2515,6 +2634,280 @@ Additional opinion guidance:
             "- Prefer 3-6 strong opinion arcs across a long window rather than many micro-claims when the transcript allows it\n"
             "- Do not cover the whole window for completeness; only return moments with clear publishable value"
         )
+
+    def _build_video_summary_transcript(
+        self, asr_result: list, max_chars: int = 24000
+    ) -> tuple[str, bool]:
+        """Build a compact transcript snippet for summary generation."""
+        transcript_lines = []
+        total_chars = 0
+        truncated = False
+
+        for seg in asr_result:
+            if not isinstance(seg, dict):
+                continue
+            text = str(seg.get("text", "")).strip()
+            if not text:
+                continue
+            start = float(seg.get("start", 0.0))
+            end = float(seg.get("end", 0.0))
+            line = f"[{start:.1f}s - {end:.1f}s] {text}"
+            line_len = len(line) + 1
+            if transcript_lines and total_chars + line_len > max_chars:
+                truncated = True
+                break
+            transcript_lines.append(line)
+            total_chars += line_len
+
+        transcript = "\n".join(transcript_lines)
+        if truncated:
+            transcript += "\n...[truncated]"
+        return transcript, truncated
+
+    def _build_video_summary_prompt(
+        self,
+        analysis_result: dict,
+        video_name: str,
+        transcript: str,
+        transcript_truncated: bool,
+    ) -> str:
+        """Build the LLM prompt for a Chinese video summary."""
+        asr_result = analysis_result.get("asr_result", [])
+        topic_summaries = analysis_result.get("topic_summaries", [])
+        topic_segments = analysis_result.get("topic_segments", [])
+        audio_climax_points = analysis_result.get("audio_climax_points", [])
+        scene_changes = analysis_result.get("scene_changes", [])
+
+        return f"""你是一名擅长把视频内容提炼成高密度中文总结的助手。
+
+请基于下面的 ASR 文本和已有分析信息，生成一个适合直接写入 Markdown 的视频总结内容。
+
+要求：
+- 输出必须是严格 JSON，不要输出 Markdown，不要输出额外解释
+- 用中文写作，面向希望高效理解视频核心内容的读者
+- 不要复述整段字幕，要提炼主线、结论、方法、启示和价值
+- 如果内容偏知识/教程，强调方法、步骤、注意事项和实践价值
+- 如果内容偏观点/评论，强调核心立场、论据、反方可能的疑问和适用边界
+- 如果存在 topic_summaries 或 topic_segments，请把它们当作结构线索
+- 如果 transcript 已截断，请优先保留最能代表核心内容的部分
+
+视频文件名: {video_name}
+ASR 段数: {len(asr_result)}
+主题摘要数量: {len(topic_summaries) if isinstance(topic_summaries, list) else 0}
+主题分段数量: {len(topic_segments) if isinstance(topic_segments, list) else 0}
+音频高潮点数量: {len(audio_climax_points) if isinstance(audio_climax_points, list) else 0}
+场景切换点数量: {len(scene_changes) if isinstance(scene_changes, list) else 0}
+Transcript 是否截断: {"yes" if transcript_truncated else "no"}
+
+可参考的结构信息：
+主题摘要: {json.dumps(topic_summaries, ensure_ascii=False)}
+主题分段: {json.dumps(topic_segments, ensure_ascii=False)}
+音频高潮点: {json.dumps(audio_climax_points, ensure_ascii=False)}
+场景切换点: {json.dumps(scene_changes, ensure_ascii=False)}
+
+Transcript:
+{transcript}
+
+请返回以下 JSON 结构：
+{{
+  "title": "简洁、准确、有吸引力的标题",
+  "one_sentence_summary": "一句话概括视频核心内容",
+  "core_points": ["核心观点1", "核心观点2", "核心观点3"],
+  "insights": ["对用户的启示1", "对用户的启示2", "对用户的启示3"],
+  "actionable_takeaways": ["可执行建议1", "可执行建议2", "可执行建议3"],
+  "best_for": ["适合的人群1", "适合的人群2"],
+  "keywords": ["关键词1", "关键词2", "关键词3"]
+}}
+
+规则：
+- core_points / insights / actionable_takeaways 至少各 3 条
+- best_for 至少 2 条
+- keywords 3-8 个
+- title 不要过长
+- 只输出 JSON
+"""
+
+    def _build_video_summary_data(
+        self,
+        analysis_result: dict,
+        api_key: str,
+        base_url: str,
+        video_name: str,
+    ) -> Optional[dict]:
+        """Call the LLM and parse summary JSON."""
+        import requests
+
+        asr_result = analysis_result.get("asr_result", [])
+        transcript, transcript_truncated = self._build_video_summary_transcript(
+            asr_result
+        )
+        prompt = self._build_video_summary_prompt(
+            analysis_result=analysis_result,
+            video_name=video_name,
+            transcript=transcript,
+            transcript_truncated=transcript_truncated,
+        )
+
+        system_prompt = (
+            "你是一个严谨的视频总结助手。"
+            "你必须只返回严格 JSON，且内容要适合直接渲染为中文 Markdown。"
+        )
+        payload = {
+            "model": self.llm_model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.2,
+            "max_tokens": 2048,
+        }
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+
+        response = None
+        last_error = None
+        for attempt in range(1, 3):
+            try:
+                response = requests.post(
+                    f"{base_url}/chat/completions",
+                    headers=headers,
+                    json=payload,
+                    timeout=self.llm_timeout,
+                )
+                break
+            except requests.RequestException as e:
+                last_error = e
+                logging.warning(
+                    "Video summary request attempt %s failed for %s: %s",
+                    attempt,
+                    video_name,
+                    e,
+                )
+                if attempt < 2:
+                    time.sleep(1.5 * attempt)
+
+        if response is None:
+            logging.error("Video summary request failed: %s", last_error)
+            return None
+
+        if response.status_code != 200:
+            logging.error(
+                "Video summary API error for %s: %s - %s",
+                video_name,
+                response.status_code,
+                response.text,
+            )
+            return None
+
+        try:
+            result = response.json()
+            content = result.get("choices", [])[0].get("message", {}).get(
+                "content", ""
+            )
+        except Exception as e:
+            logging.error("Failed to read video summary response: %s", e)
+            return None
+
+        parsed = self._extract_json_object(content)
+        if not parsed:
+            logging.error("No valid JSON found in video summary response for %s", video_name)
+            return None
+
+        return {
+            "title": str(parsed.get("title", "")).strip() or video_name,
+            "one_sentence_summary": str(parsed.get("one_sentence_summary", "")).strip(),
+            "core_points": [
+                str(item).strip()
+                for item in parsed.get("core_points", [])
+                if str(item).strip()
+            ],
+            "insights": [
+                str(item).strip()
+                for item in parsed.get("insights", [])
+                if str(item).strip()
+            ],
+            "actionable_takeaways": [
+                str(item).strip()
+                for item in parsed.get("actionable_takeaways", [])
+                if str(item).strip()
+            ],
+            "best_for": [
+                str(item).strip()
+                for item in parsed.get("best_for", [])
+                if str(item).strip()
+            ],
+            "keywords": [
+                str(item).strip()
+                for item in parsed.get("keywords", [])
+                if str(item).strip()
+            ],
+        }
+
+    def _render_video_summary_markdown(
+        self,
+        summary_data: dict,
+        analysis_result: dict,
+        video_name: str,
+    ) -> str:
+        """Render the summary JSON as Markdown."""
+        video_path = analysis_result.get("video_path", "")
+        generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        def _bullets(items: list) -> str:
+            if not items:
+                return "- 无"
+            return "\n".join(f"- {item}" for item in items)
+
+        md = [
+            f"# {summary_data.get('title') or '视频总结'}",
+            "",
+            f"- **视频文件**: `{video_name}`",
+            f"- **源路径**: `{video_path}`" if video_path else "- **源路径**: 未提供",
+            f"- **生成时间**: {generated_at}",
+            "",
+            "## 一句话概括",
+            "",
+            summary_data.get("one_sentence_summary", "").strip() or "暂无",
+            "",
+            "## 核心内容",
+            "",
+            _bullets(summary_data.get("core_points", [])),
+            "",
+            "## 对用户的启示与价值",
+            "",
+            _bullets(summary_data.get("insights", [])),
+            "",
+            "## 可执行建议",
+            "",
+            _bullets(summary_data.get("actionable_takeaways", [])),
+            "",
+            "## 适合谁看",
+            "",
+            _bullets(summary_data.get("best_for", [])),
+            "",
+            "## 关键词",
+            "",
+            ", ".join(summary_data.get("keywords", [])) or "无",
+        ]
+
+        topic_summaries = analysis_result.get("topic_summaries", [])
+        if isinstance(topic_summaries, list) and topic_summaries:
+            md.extend(
+                [
+                    "",
+                    "## 结构线索",
+                    "",
+                ]
+            )
+            for idx, item in enumerate(topic_summaries[:8], 1):
+                topic = str(item.get("topic", "")).strip()
+                summary = str(item.get("summary", "")).strip()
+                if topic or summary:
+                    md.append(f"{idx}. {topic or '主题'} - {summary or '无'}")
+
+        return "\n".join(md).strip() + "\n"
 
     def _segment_topic_window(
         self,

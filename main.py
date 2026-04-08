@@ -9,6 +9,8 @@ Short Video Tool - 短视频一键处理工具
 用法:
     python main.py --url <视频URL>                      # 基础：下载并处理
     python main.py --local-file <本地视频路径>           # 跳过下载，直接处理本地文件
+    python main.py --summary-only --url <视频URL>       # 仅 ASR + LLM 总结，输出 video_summary.md
+    python main.py --summary --url <视频URL>            # 正常流程结束后额外生成视频总结
 
 视频源参数（二选一，必须提供其中之一）:
     --url <URL>              视频链接（支持 YouTube / TikTok / Twitter）
@@ -70,6 +72,12 @@ Short Video Tool - 短视频一键处理工具
 
     # 快速烧录：显式指定字幕文件
     python main.py --burn-only --video video.mp4 --en-subtitle video_en.srt --zh-subtitle video_zh.srt --output Out-0403
+
+    # 仅生成视频总结
+    python main.py --summary-only --url "https://youtube.com/watch?v=VIDEO_ID" --output ./result
+
+    # 运行完整流程并额外生成视频总结
+    python main.py --summary --local-file ./my_video.mp4 --output ./result
 """
 
 import argparse
@@ -182,6 +190,33 @@ def _configure_logging(log_level: str, log_file: str) -> None:
         ],
         force=True,
     )
+
+
+def _configure_output_dirs(config, output_root: str) -> None:
+    config.output_dir = output_root
+    config.analysis_dir = os.path.join(output_root, "analysis")
+    config.clips_dir = os.path.join(output_root, "clips")
+    config.subtitles_dir = os.path.join(output_root, "subtitles")
+
+
+def _resolve_input_video(args, config) -> str | None:
+    if args.local_file:
+        local_path = os.path.abspath(args.local_file)
+        if not os.path.exists(local_path):
+            logging.error(f"Local file not found: {local_path}")
+            return None
+        logging.info(f"✅ Using local file: {local_path}")
+        return local_path
+
+    downloader = Downloader(output_dir=config.downloads_dir, config=config)
+    download_result = downloader.download_video(url=args.url, quality=args.quality)
+    if not download_result:
+        logging.error("Failed to download video")
+        return None
+
+    video_path = download_result["filepath"]
+    logging.info(f"✅ Downloaded: {video_path}")
+    return video_path
 
 
 def _run_burn_only(args, config) -> int:
@@ -367,6 +402,12 @@ def main():
 
   # 快速烧录：显式指定字幕文件
   python main.py --burn-only --video video.mp4 --en-subtitle video_en.srt --zh-subtitle video_zh.srt --output Out-0403
+
+  # 仅生成视频总结
+  python main.py --summary-only --url "https://youtube.com/watch?v=VIDEO_ID" --output ./result
+
+  # 运行完整流程并额外生成视频总结
+  python main.py --summary --local-file ./my_video.mp4 --output ./result
         """,
     )
 
@@ -388,6 +429,18 @@ def main():
         "--output",
         default=config.output_dir,
         help="输出目录（默认: %(default)s）",
+    )
+
+    summary_group = parser.add_mutually_exclusive_group()
+    summary_group.add_argument(
+        "--summary",
+        action="store_true",
+        help="在完整流程结束后额外生成视频总结 Markdown",
+    )
+    summary_group.add_argument(
+        "--summary-only",
+        action="store_true",
+        help="仅执行 ASR + LLM 视频总结，不运行切片、翻译、整合、烧录",
     )
 
     # ── 切片控制 ──
@@ -489,10 +542,7 @@ def main():
 
     # Derive all sub-dirs from --output so every run is fully isolated
     output_root = args.output
-    config.output_dir = output_root
-    config.analysis_dir = os.path.join(output_root, "analysis")
-    config.clips_dir = os.path.join(output_root, "clips")
-    config.subtitles_dir = os.path.join(output_root, "subtitles")
+    _configure_output_dirs(config, output_root)
     config.min_clip_duration = args.min_duration
     config.max_clip_duration = args.max_duration
     config.max_clips = args.max_clips
@@ -517,28 +567,49 @@ def main():
     try:
         # Step 1: Download video (or use local file)
         logging.info("\n" + "=" * 70)
-        logging.info("Step 1/5: Downloading video...")
+        if args.summary_only:
+            logging.info("Step 1/2: Loading input video...")
+        else:
+            logging.info("Step 1/5: Downloading video...")
         logging.info("=" * 70)
 
-        if args.local_file:
-            local_path = os.path.abspath(args.local_file)
-            if not os.path.exists(local_path):
-                logging.error(f"Local file not found: {local_path}")
-                return 1
-            video_path = local_path
-            logging.info(f"✅ Using local file: {video_path}")
-        else:
-            downloader = Downloader(output_dir=config.downloads_dir, config=config)
-            download_result = downloader.download_video(
-                url=args.url, quality=args.quality
+        video_path = _resolve_input_video(args, config)
+        if not video_path:
+            return 1
+
+        if args.summary_only:
+            analyzer = Analyzer(config=config)
+            logging.info("\n" + "=" * 70)
+            logging.info("Step 2/2: Generating video summary...")
+            logging.info("=" * 70)
+
+            summary_analysis_result = analyzer.analyze_video_for_summary(
+                video_path=video_path,
+                output_dir=config.analysis_dir,
             )
 
-            if not download_result:
-                logging.error("Failed to download video")
+            if not summary_analysis_result:
+                logging.error("Failed to generate summary-only analysis")
                 return 1
 
-            video_path = download_result["filepath"]
-            logging.info(f"✅ Downloaded: {video_path}")
+            summary_path = analyzer.generate_video_summary(
+                analysis_result=summary_analysis_result,
+                output_dir=args.output,
+                video_path=video_path,
+            )
+            if not summary_path:
+                return 1
+
+            end_time = datetime.now()
+            total_time = (end_time - start_time).total_seconds()
+            logging.info("=" * 70)
+            logging.info("Summary-only Complete!")
+            logging.info("=" * 70)
+            logging.info(f"Total time: {total_time:.2f} seconds")
+            logging.info(f"Output directory: {args.output}/")
+            logging.info(f"Video summary: {summary_path}")
+            logging.info(f"Log file: {config.log_file}")
+            return 0
 
         # Step 2: Analyze video
         logging.info("\n" + "=" * 70)
@@ -719,6 +790,20 @@ def main():
             else:
                 logging.warning("⚠️ Failed to embed subtitles")
 
+        if args.summary:
+            logging.info("\n" + "=" * 70)
+            logging.info("Optional: Generating video summary...")
+            logging.info("=" * 70)
+            summary_path = analyzer.generate_video_summary(
+                analysis_result=analysis_result,
+                output_dir=args.output,
+                video_path=video_path,
+            )
+            if summary_path:
+                logging.info(f"✅ Video summary generated: {summary_path}")
+            else:
+                logging.warning("⚠️ Failed to generate video summary")
+
         # Summary
         end_time = datetime.now()
         total_time = (end_time - start_time).total_seconds()
@@ -729,6 +814,8 @@ def main():
         logging.info(f"Total time: {total_time:.2f} seconds")
         logging.info(f"Output directory: {args.output}/")
         logging.info(f"Summary report: {args.output}/summary.md")
+        if args.summary:
+            logging.info(f"Video summary: {args.output}/video_summary.md")
         logging.info(f"Log file: {config.log_file}")
 
         return 0
