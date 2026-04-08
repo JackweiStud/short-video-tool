@@ -72,6 +72,131 @@ class Analyzer:
             return f"{hours:02d}:{minutes:02d}:{secs:02d}"
         return f"{minutes:02d}:{secs:02d}"
 
+    def _build_asr_chunk_windows(self, duration: float) -> list:
+        """Build overlapping chunk windows for ASR processing."""
+        chunk_duration = self.asr_chunk_duration
+        overlap = self.asr_overlap_seconds
+        chunks = []
+        start = 0.0
+        chunk_idx = 0
+        while start < duration:
+            end = min(start + chunk_duration, duration)
+            chunks.append((chunk_idx, start, end))
+            chunk_idx += 1
+            if end >= duration:
+                break
+            start = end - overlap
+        return chunks
+
+    def _build_asr_cache_key_prefix(
+        self,
+        engine_prefix: str,
+        audio_path: str,
+        model: str,
+        language: str,
+        cache_source_path: Optional[str] = None,
+    ) -> str:
+        """Build the cache key prefix for one ASR engine."""
+        cache_md5_source = cache_source_path or audio_path
+        source_md5 = self._get_file_md5(cache_md5_source)
+        if engine_prefix:
+            return f"{engine_prefix}_{source_md5}_{model}_{language}"
+        return f"{source_md5}_{model}_{language}"
+
+    def _build_asr_chunk_cache_file(self, cache_key_prefix: str, chunk_idx: int) -> Path:
+        """Return the cache file path for a specific ASR chunk."""
+        return self.asr_cache_dir / f"{cache_key_prefix}_chunk{chunk_idx:03d}.json"
+
+    def _read_asr_chunk_cache(
+        self,
+        engine_name: str,
+        cache_file: Path,
+        chunk_label: str,
+        chunk_start: float,
+        chunk_duration: float,
+    ) -> Optional[list]:
+        """Read a cached ASR chunk if it exists and looks valid."""
+        if not cache_file.exists():
+            return None
+
+        try:
+            with open(cache_file, "r", encoding="utf-8") as f:
+                cached = json.load(f)
+            if isinstance(cached, list) and len(cached) > 0:
+                cached = self._normalize_cached_asr_segments(
+                    cached,
+                    chunk_start=chunk_start,
+                    chunk_duration=chunk_duration,
+                )
+                logging.info(
+                    f"[{engine_name}] {chunk_label}: cache hit {cache_file.name} ({len(cached)} segments)"
+                )
+                return cached
+
+            logging.warning(
+                f"[{engine_name}] {chunk_label}: cache invalid ({cache_file.name}), re-processing"
+            )
+        except Exception as e:
+            logging.warning(
+                f"[{engine_name}] {chunk_label}: cache read failed: {e}, re-processing"
+            )
+
+        cache_file.unlink(missing_ok=True)
+        return None
+
+    def _write_asr_chunk_cache(
+        self,
+        engine_name: str,
+        cache_file: Path,
+        chunk_label: str,
+        segments: list,
+    ) -> None:
+        """Write normalized ASR chunk data to cache."""
+        try:
+            with open(cache_file, "w", encoding="utf-8") as f:
+                json.dump(segments, f, ensure_ascii=False, indent=2)
+            logging.info(
+                f"[{engine_name}] {chunk_label}: cached to {cache_file.name}"
+            )
+        except Exception as e:
+            logging.warning(
+                f"[{engine_name}] {chunk_label}: cache write failed: {e}"
+            )
+
+    def _run_cached_asr_chunk(
+        self,
+        engine_name: str,
+        cache_file: Path,
+        chunk_label: str,
+        chunk_start: float,
+        chunk_duration: float,
+        process_chunk,
+    ) -> Optional[list]:
+        """Run a chunk with cache hit/read/write handling."""
+        cached = self._read_asr_chunk_cache(
+            engine_name,
+            cache_file,
+            chunk_label,
+            chunk_start,
+            chunk_duration,
+        )
+        if cached is not None:
+            return cached
+
+        processed = process_chunk()
+        if processed is None:
+            return None
+
+        chunk_segments, cache_segments = processed
+        if cache_segments is not None:
+            self._write_asr_chunk_cache(
+                engine_name,
+                cache_file,
+                chunk_label,
+                cache_segments,
+            )
+        return chunk_segments
+
     def _resolve_whisper_cli(self) -> Optional[str]:
         """Resolve the whisper CLI executable from env, PATH, or common installs."""
         candidates = [
@@ -174,6 +299,7 @@ class Analyzer:
             audio_path,
             model=self.whisper_model,
             language=self.asr_language,
+            cache_source_path=video_path,
         )
 
         run_audio_analysis, run_scene_detection, run_topic_segmentation = (
@@ -338,7 +464,11 @@ class Analyzer:
             return None
 
     def _run_asr(
-        self, audio_path: str, model: str = "medium", language: str = "en"
+        self,
+        audio_path: str,
+        model: str = "medium",
+        language: str = "en",
+        cache_source_path: Optional[str] = None,
     ) -> list:
         """
         Run ASR using mlx-whisper (Apple Silicon), faster-whisper, or fallback to whisper CLI.
@@ -349,7 +479,12 @@ class Analyzer:
             try:
                 import mlx_whisper  # noqa: F401
                 logging.info("[ASR] mlx-whisper available on Apple Silicon, using native MLX engine for massive speedup")
-                return self._run_asr_mlx_whisper(audio_path, model, language)
+                return self._run_asr_mlx_whisper(
+                    audio_path,
+                    model,
+                    language,
+                    cache_source_path=cache_source_path,
+                )
             except ImportError:
                 logging.warning(
                     "[ASR] Apple Silicon detected but mlx-whisper not installed. "
@@ -593,13 +728,45 @@ class Analyzer:
         return False
 
     def _run_asr_mlx_whisper(
-        self, audio_path: str, model: str = "medium", language: str = "en"
+        self,
+        audio_path: str,
+        model: str = "medium",
+        language: str = "en",
+        cache_source_path: Optional[str] = None,
     ) -> list:
         """
-        Run ASR using Apple MLX natively for Mac GPUs.
+        Chunked MLX Whisper ASR with segment-level cache and overlap merging.
+        Mirrors the faster-whisper / whisper-cli chunk cache flow, but uses an
+        isolated MLX cache key prefix to avoid collisions with other engines.
         """
         import mlx_whisper
+        import tempfile
+        import threading
+        import shutil
         import os
+
+        duration = self._get_audio_duration(audio_path)
+        logging.info(
+            f"[mlx-whisper] Audio duration: {duration:.1f}s ({duration / 60:.1f} min)"
+        )
+
+        # Setup cache
+        self.asr_cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_key_prefix = self._build_asr_cache_key_prefix(
+            "mlx",
+            audio_path,
+            model,
+            language,
+            cache_source_path=cache_source_path,
+        )
+
+        # Build chunks using the same overlap policy as the other engines
+        chunks = self._build_asr_chunk_windows(duration)
+
+        total = len(chunks)
+        logging.info(
+            f"[mlx-whisper] Processing {total} chunks (chunk_duration={self.asr_chunk_duration}s, overlap={self.asr_overlap_seconds}s)"
+        )
 
         # Check for local model first
         mlx_local_base = getattr(self.config, 'mlx_whisper_local_model_dir', None)
@@ -615,55 +782,210 @@ class Analyzer:
             # Default fallback to mlx-community repo structures for whisper:
             mlx_model_repo = f"mlx-community/whisper-{model}-mlx"
             logging.info(f"[mlx-whisper] Transcribing audio with Apple GPU via: {mlx_model_repo}")
-        
+
         try:
-            # MLX heavily optimizes memory and runs pure GPU natively.
-            # Passing the audio file entirely works extremely well under this unified memory model.
+            all_segments = []
+            failed_chunks = []
+            tmp_dir = tempfile.mkdtemp(prefix="mlx_asr_chunks_")
 
-            # Parameters to reduce hallucination:
-            # - temperature=0: More deterministic, less creative/hallucinatory
-            # - compression_ratio_threshold=2.4: Reject segments with high compression ratio (likely repetitive)
-            # - logprob_threshold=-1.0: Reject segments with low confidence
-            # - no_speech_threshold=0.6: Better detection of silence/music
-            # - condition_on_previous_text=False: CRITICAL - Don't condition on previous text to avoid repetition loops
-            # - hallucination_silence_threshold=0.5: Detect and skip hallucinated segments during silence
-            result = mlx_whisper.transcribe(
-                audio_path,
-                path_or_hf_repo=mlx_model_repo,
-                word_timestamps=self.whisper_word_timestamps,
-                language=language,
-                temperature=0.0,  # Deterministic mode to reduce hallucination
-                compression_ratio_threshold=2.4,  # Reject highly repetitive segments
-                logprob_threshold=-1.0,  # Reject low-confidence segments
-                no_speech_threshold=0.6,  # Better silence detection
-                condition_on_previous_text=False,  # CRITICAL: Prevent repetition loops
-                hallucination_silence_threshold=0.5,  # Skip hallucinations during silence (0-1, lower = more aggressive)
-            )
-            
-            segments = []
-            for seg in result.get("segments", []):
-                words = []
-                for w in seg.get("words", []):
-                    words.append({
-                        "word": w.get("word", "").strip(),
-                        "start": round(w.get("start", 0.0), 3),
-                        "end": round(w.get("end", 0.0), 3),
-                    })
-                
-                segments.append({
-                    "start": round(seg.get("start", 0.0), 3),
-                    "end": round(seg.get("end", 0.0), 3),
-                    "text": seg.get("text", "").strip(),
-                    "words": words,
-                })
-                
-            logging.info(f"[mlx-whisper] Complete. Mapped {len(segments)} segments rapidly via Apple GPU.")
+            try:
+                for idx, chunk_start, chunk_end in chunks:
+                    cache_file = self._build_asr_chunk_cache_file(cache_key_prefix, idx)
+                    chunk_span = chunk_end - chunk_start
+                    chunk_label = (
+                        f"chunk {idx + 1}/{total} "
+                        f"[{self._format_duration_mmss(chunk_start)}"
+                        f" -> {self._format_duration_mmss(chunk_end)}, "
+                        f"len={self._format_duration_mmss(chunk_span)}]"
+                    )
 
-            # Post-process: remove repetitive hallucinations
-            segments = self._remove_repetitive_segments(segments)
+                    chunk_wav = os.path.join(tmp_dir, f"chunk_{idx:03d}.wav")
+                    def _process_chunk():
+                        logging.info(
+                            f"[mlx-whisper] {chunk_label}: extracting audio for transcription"
+                        )
 
-            return segments
-            
+                        ffmpeg_cmd = [
+                            "ffmpeg",
+                            "-y",
+                            "-ss",
+                            str(chunk_start),
+                            "-t",
+                            str(chunk_end - chunk_start),
+                            "-i",
+                            audio_path,
+                            "-ar",
+                            "16000",
+                            "-ac",
+                            "1",
+                            "-f",
+                            "wav",
+                            chunk_wav,
+                        ]
+                        try:
+                            ffmpeg_result = subprocess.run(
+                                ffmpeg_cmd,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE,
+                                timeout=120,
+                            )
+                            if ffmpeg_result.returncode != 0:
+                                logging.warning(
+                                    f"[mlx-whisper] {chunk_label}: ffmpeg extraction failed, skipping"
+                                )
+                                return None
+                        except subprocess.TimeoutExpired:
+                            logging.warning(
+                                f"[mlx-whisper] {chunk_label}: ffmpeg timeout, skipping"
+                            )
+                            return None
+
+                        logging.info(
+                            f"[mlx-whisper] {chunk_label}: starting transcription "
+                            f"(timeout={self.asr_segment_timeout}s, word_timestamps={self.whisper_word_timestamps})"
+                        )
+
+                        result_container = []
+                        error_container = []
+
+                        def _transcribe():
+                            try:
+                                result_container.append(
+                                    mlx_whisper.transcribe(
+                                        chunk_wav,
+                                        path_or_hf_repo=mlx_model_repo,
+                                        word_timestamps=self.whisper_word_timestamps,
+                                        language=language,
+                                        temperature=0.0,
+                                        compression_ratio_threshold=2.4,
+                                        logprob_threshold=-1.0,
+                                        no_speech_threshold=0.6,
+                                        condition_on_previous_text=False,
+                                        hallucination_silence_threshold=0.5,
+                                    )
+                                )
+                            except Exception as e:
+                                error_container.append(e)
+
+                        t_chunk_start = time.time()
+                        t = threading.Thread(target=_transcribe, daemon=True)
+                        t.start()
+                        t.join(timeout=self.asr_segment_timeout)
+                        elapsed = time.time() - t_chunk_start
+
+                        try:
+                            if t.is_alive():
+                                logging.error(
+                                    f"[mlx-whisper] {chunk_label}: timeout after {self.asr_segment_timeout}s"
+                                )
+                                return None
+
+                            if error_container:
+                                logging.error(
+                                    f"[mlx-whisper] {chunk_label}: error: {error_container[0]}"
+                                )
+                                return None
+
+                            if not result_container:
+                                logging.error(f"[mlx-whisper] {chunk_label}: no result")
+                                return None
+
+                            result = result_container[0]
+                            raw_segments = []
+                            for seg in result.get("segments", []):
+                                words = []
+                                for w in seg.get("words", []):
+                                    words.append(
+                                        {
+                                            "word": w.get("word", "").strip(),
+                                            "start": round(w.get("start", 0.0), 3),
+                                            "end": round(w.get("end", 0.0), 3),
+                                        }
+                                    )
+                                raw_segments.append(
+                                    {
+                                        "start": round(seg.get("start", 0.0), 3),
+                                        "end": round(seg.get("end", 0.0), 3),
+                                        "text": seg.get("text", "").strip(),
+                                        "words": words,
+                                    }
+                                )
+
+                            if not raw_segments:
+                                logging.warning(
+                                    f"[mlx-whisper] {chunk_label}: no segments returned"
+                                )
+                                return None
+
+                            chunk_segments = []
+                            for seg in raw_segments:
+                                shifted = dict(seg)
+                                shifted["start"] = round(
+                                    shifted.get("start", 0.0) + chunk_start, 3
+                                )
+                                shifted["end"] = round(
+                                    shifted.get("end", 0.0) + chunk_start, 3
+                                )
+                                words = shifted.get("words", [])
+                                if isinstance(words, list):
+                                    shifted_words = []
+                                    for word in words:
+                                        if not isinstance(word, dict):
+                                            continue
+                                        shifted_word = dict(word)
+                                        shifted_word["start"] = round(
+                                            shifted_word.get("start", 0.0) + chunk_start, 3
+                                        )
+                                        shifted_word["end"] = round(
+                                            shifted_word.get("end", 0.0) + chunk_start, 3
+                                        )
+                                        shifted_words.append(shifted_word)
+                                    shifted["words"] = shifted_words
+                                chunk_segments.append(shifted)
+
+                            logging.info(
+                                f"[mlx-whisper] {chunk_label}: completed with {len(chunk_segments)} segments, elapsed {elapsed:.1f}s"
+                            )
+                            return chunk_segments, raw_segments
+                        finally:
+                            try:
+                                os.remove(chunk_wav)
+                            except Exception:
+                                pass
+                            try:
+                                os.remove(os.path.splitext(chunk_wav)[0] + ".json")
+                            except Exception:
+                                pass
+
+                    chunk_segments = self._run_cached_asr_chunk(
+                        "mlx-whisper",
+                        cache_file,
+                        chunk_label,
+                        chunk_start,
+                        chunk_end - chunk_start,
+                        _process_chunk,
+                    )
+                    if chunk_segments is None:
+                        failed_chunks.append((idx, chunk_start, chunk_end))
+                        continue
+
+                    all_segments.extend(chunk_segments)
+            finally:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+
+            if failed_chunks:
+                logging.warning(
+                    f"[mlx-whisper] {len(failed_chunks)} failed chunks: {[c[0] for c in failed_chunks]}"
+                )
+                logging.warning(
+                    "[mlx-whisper] Re-run to resume - completed chunks are cached"
+                )
+
+            merged = self._merge_asr_segments(all_segments)
+            merged = self._remove_repetitive_segments(merged)
+            logging.info(f"[mlx-whisper] ASR complete: {len(merged)} segments total")
+            return merged
+
         except Exception as e:
             logging.error(f"[mlx-whisper] Failed to run MLX transcription: {e}")
             logging.warning("[mlx-whisper] Falling back to faster-whisper chunks...")
@@ -687,26 +1009,16 @@ class Analyzer:
 
         # Setup cache
         self.asr_cache_dir.mkdir(parents=True, exist_ok=True)
-        video_md5 = self._get_file_md5(audio_path)
-        cache_key_prefix = f"fw_{video_md5}_{model}_{language}"
+        cache_key_prefix = self._build_asr_cache_key_prefix(
+            "fw", audio_path, model, language
+        )
 
         # Build chunks (same logic as whisper-cli)
-        chunk_duration = self.asr_chunk_duration
-        overlap = self.asr_overlap_seconds
-        chunks = []
-        start = 0.0
-        chunk_idx = 0
-        while start < duration:
-            end = min(start + chunk_duration, duration)
-            chunks.append((chunk_idx, start, end))
-            chunk_idx += 1
-            if end >= duration:
-                break
-            start = end - overlap
+        chunks = self._build_asr_chunk_windows(duration)
 
         total = len(chunks)
         logging.info(
-            f"[faster-whisper] Processing {total} chunks (chunk_duration={chunk_duration}s, overlap={overlap}s)"
+            f"[faster-whisper] Processing {total} chunks (chunk_duration={self.asr_chunk_duration}s, overlap={self.asr_overlap_seconds}s)"
         )
 
         import os
@@ -738,9 +1050,7 @@ class Analyzer:
 
         try:
             for idx, chunk_start, chunk_end in chunks:
-                cache_file = (
-                    self.asr_cache_dir / f"{cache_key_prefix}_chunk{idx:03d}.json"
-                )
+                cache_file = self._build_asr_chunk_cache_file(cache_key_prefix, idx)
                 chunk_span = chunk_end - chunk_start
                 chunk_label = (
                     f"chunk {idx + 1}/{total} "
@@ -748,205 +1058,163 @@ class Analyzer:
                     f" -> {self._format_duration_mmss(chunk_end)}, "
                     f"len={self._format_duration_mmss(chunk_span)}]"
                 )
-
-                # Cache hit
-                if cache_file.exists():
-                    try:
-                        with open(cache_file, "r", encoding="utf-8") as f:
-                            cached = json.load(f)
-                        if isinstance(cached, list) and len(cached) > 0:
-                            cached = self._normalize_cached_asr_segments(
-                                cached,
-                                chunk_start=chunk_start,
-                                chunk_duration=chunk_end - chunk_start,
-                            )
-                            logging.info(
-                                f"[faster-whisper] {chunk_label}: cache hit ({len(cached)} segments)"
-                            )
-                            all_segments.extend(cached)
-                            continue
-                        else:
-                            logging.warning(
-                                f"[faster-whisper] {chunk_label}: cache invalid, re-processing"
-                            )
-                            cache_file.unlink(missing_ok=True)
-                    except Exception as e:
-                        logging.warning(
-                            f"[faster-whisper] {chunk_label}: cache read error {e}, re-processing"
-                        )
-                        cache_file.unlink(missing_ok=True)
-
-                logging.info(
-                    f"[faster-whisper] {chunk_label}: extracting audio for transcription"
-                )
-
-                # Extract chunk audio
                 chunk_wav = os.path.join(tmp_dir, f"chunk_{idx:03d}.wav")
-                ffmpeg_cmd = [
-                    "ffmpeg",
-                    "-y",
-                    "-ss",
-                    str(chunk_start),
-                    "-t",
-                    str(chunk_end - chunk_start),
-                    "-i",
-                    audio_path,
-                    "-ar",
-                    "16000",
-                    "-ac",
-                    "1",
-                    "-f",
-                    "wav",
-                    chunk_wav,
-                ]
-                try:
-                    subprocess.run(
-                        ffmpeg_cmd, capture_output=True, timeout=120, check=True
-                    )
-                except Exception as e:
-                    logging.error(
-                        f"[faster-whisper] {chunk_label}: ffmpeg failed: {e}"
-                    )
-                    failed_chunks.append((idx, chunk_start, chunk_end))
-                    continue
-
-                import threading
-
-                t_chunk_start = time.time()
-                result_container = []
-                error_container = []
-
-                def _transcribe():
-                    try:
-                        import platform
-                        from faster_whisper import WhisperModel
-                        
-                        # Use CUDA if configured, else auto
-                        device_type = "cuda" if getattr(self.config, "enable_gpu", False) else "auto"
-                        
-                        # On Mac M-series (Apple Silicon), int8 is generally slower than float32.
-                        # "default" allows CTranslate2 to pick the most optimal available type.
-                        compute_type = "default"
-                        
-                        fw_model = WhisperModel(
-                            model_id, 
-                            device=device_type, 
-                            compute_type=compute_type,
-                            cpu_threads=max(1, os.cpu_count() - 2) if os.cpu_count() else 4
-                        )
-                        segs, info = fw_model.transcribe(
-                            chunk_wav,
-                            language=language,
-                            word_timestamps=self.whisper_word_timestamps,
-                            vad_filter=self.asr_vad_filter,
-                        )
-                        result_container.append(list(segs))
-                    except Exception as e:
-                        error_container.append(e)
-
-                logging.info(
-                    f"[faster-whisper] {chunk_label}: starting transcription "
-                    f"(timeout={self.asr_segment_timeout}s, vad_filter={self.asr_vad_filter}, isolated_process=False)"
-                )
-                t = threading.Thread(target=_transcribe, daemon=True)
-                t.start()
-                t.join(timeout=self.asr_segment_timeout)
-
-                elapsed = time.time() - t_chunk_start
-
-                if t.is_alive():
-                    logging.error(
-                        f"[faster-whisper] {chunk_label}: timeout after {self.asr_segment_timeout}s"
-                    )
-                    failed_chunks.append((idx, chunk_start, chunk_end))
-                    try:
-                        os.remove(chunk_wav)
-                    except Exception:
-                        pass
-                    continue
-
-                if error_container:
-                    logging.error(
-                        f"[faster-whisper] {chunk_label}: error: {error_container[0]}"
-                    )
-                    failed_chunks.append((idx, chunk_start, chunk_end))
-                    continue
-
-                if not result_container:
-                    logging.error(
-                        f"[faster-whisper] {chunk_label}: no result"
-                    )
-                    failed_chunks.append((idx, chunk_start, chunk_end))
-                    continue
-
-                raw_segs = result_container[0]
-
-                # Convert faster-whisper Segment objects to dict + shift timestamps
-                chunk_segments = []
-                for seg in raw_segs:
-                    words = []
-                    if seg.words:
-                        for w in seg.words:
-                            words.append(
-                                {
-                                    "word": w.word,
-                                    "start": round(w.start + chunk_start, 3),
-                                    "end": round(w.end + chunk_start, 3),
-                                }
-                            )
-                    chunk_segments.append(
-                        {
-                            "start": round(seg.start + chunk_start, 3),
-                            "end": round(seg.end + chunk_start, 3),
-                            "text": seg.text.strip(),
-                            "words": words,
-                        }
-                    )
-
-                logging.info(
-                    f"[faster-whisper] {chunk_label}: completed with {len(chunk_segments)} segments, elapsed {elapsed:.1f}s"
-                )
-
-                # Write cache (raw with local timestamps for cache, shifted above)
-                # Re-store with local (chunk-relative) timestamps for cache reuse
-                cache_segments = []
-                for seg in raw_segs:
-                    words = []
-                    if seg.words:
-                        for w in seg.words:
-                            words.append(
-                                {
-                                    "word": w.word,
-                                    "start": round(w.start, 3),
-                                    "end": round(w.end, 3),
-                                }
-                            )
-                    cache_segments.append(
-                        {
-                            "start": round(seg.start, 3),
-                            "end": round(seg.end, 3),
-                            "text": seg.text.strip(),
-                            "words": words,
-                        }
-                    )
-
-                try:
-                    with open(cache_file, "w", encoding="utf-8") as f:
-                        json.dump(cache_segments, f, ensure_ascii=False, indent=2)
+                def _process_chunk():
                     logging.info(
-                        f"[faster-whisper] {chunk_label}: cached to {cache_file.name}"
+                        f"[faster-whisper] {chunk_label}: extracting audio for transcription"
                     )
-                except Exception as e:
-                    logging.error(
-                        f"[faster-whisper] {chunk_label}: cache write error: {e}"
+
+                    ffmpeg_cmd = [
+                        "ffmpeg",
+                        "-y",
+                        "-ss",
+                        str(chunk_start),
+                        "-t",
+                        str(chunk_end - chunk_start),
+                        "-i",
+                        audio_path,
+                        "-ar",
+                        "16000",
+                        "-ac",
+                        "1",
+                        "-f",
+                        "wav",
+                        chunk_wav,
+                    ]
+                    try:
+                        subprocess.run(
+                            ffmpeg_cmd, capture_output=True, timeout=120, check=True
+                        )
+                    except Exception as e:
+                        logging.error(
+                            f"[faster-whisper] {chunk_label}: ffmpeg failed: {e}"
+                        )
+                        return None
+
+                    import threading
+
+                    t_chunk_start = time.time()
+                    result_container = []
+                    error_container = []
+
+                    def _transcribe():
+                        try:
+                            from faster_whisper import WhisperModel
+
+                            device_type = (
+                                "cuda"
+                                if getattr(self.config, "enable_gpu", False)
+                                else "auto"
+                            )
+                            compute_type = "default"
+
+                            fw_model = WhisperModel(
+                                model_id,
+                                device=device_type,
+                                compute_type=compute_type,
+                                cpu_threads=max(1, os.cpu_count() - 2)
+                                if os.cpu_count()
+                                else 4,
+                            )
+                            segs, info = fw_model.transcribe(
+                                chunk_wav,
+                                language=language,
+                                word_timestamps=self.whisper_word_timestamps,
+                                vad_filter=self.asr_vad_filter,
+                            )
+                            result_container.append(list(segs))
+                        except Exception as e:
+                            error_container.append(e)
+
+                    logging.info(
+                        f"[faster-whisper] {chunk_label}: starting transcription "
+                        f"(timeout={self.asr_segment_timeout}s, vad_filter={self.asr_vad_filter}, isolated_process=False)"
                     )
+                    t = threading.Thread(target=_transcribe, daemon=True)
+                    t.start()
+                    t.join(timeout=self.asr_segment_timeout)
+                    elapsed = time.time() - t_chunk_start
+
+                    try:
+                        if t.is_alive():
+                            logging.error(
+                                f"[faster-whisper] {chunk_label}: timeout after {self.asr_segment_timeout}s"
+                            )
+                            return None
+
+                        if error_container:
+                            logging.error(
+                                f"[faster-whisper] {chunk_label}: error: {error_container[0]}"
+                            )
+                            return None
+
+                        if not result_container:
+                            logging.error(f"[faster-whisper] {chunk_label}: no result")
+                            return None
+
+                        raw_segs = result_container[0]
+
+                        chunk_segments = []
+                        cache_segments = []
+                        for seg in raw_segs:
+                            words = []
+                            cache_words = []
+                            if seg.words:
+                                for w in seg.words:
+                                    words.append(
+                                        {
+                                            "word": w.word,
+                                            "start": round(w.start + chunk_start, 3),
+                                            "end": round(w.end + chunk_start, 3),
+                                        }
+                                    )
+                                    cache_words.append(
+                                        {
+                                            "word": w.word,
+                                            "start": round(w.start, 3),
+                                            "end": round(w.end, 3),
+                                        }
+                                    )
+                            chunk_segments.append(
+                                {
+                                    "start": round(seg.start + chunk_start, 3),
+                                    "end": round(seg.end + chunk_start, 3),
+                                    "text": seg.text.strip(),
+                                    "words": words,
+                                }
+                            )
+                            cache_segments.append(
+                                {
+                                    "start": round(seg.start, 3),
+                                    "end": round(seg.end, 3),
+                                    "text": seg.text.strip(),
+                                    "words": cache_words,
+                                }
+                            )
+
+                        logging.info(
+                            f"[faster-whisper] {chunk_label}: completed with {len(chunk_segments)} segments, elapsed {elapsed:.1f}s"
+                        )
+                        return chunk_segments, cache_segments
+                    finally:
+                        try:
+                            os.remove(chunk_wav)
+                        except Exception:
+                            pass
+
+                chunk_segments = self._run_cached_asr_chunk(
+                    "faster-whisper",
+                    cache_file,
+                    chunk_label,
+                    chunk_start,
+                    chunk_end - chunk_start,
+                    _process_chunk,
+                )
+                if chunk_segments is None:
+                    failed_chunks.append((idx, chunk_start, chunk_end))
+                    continue
 
                 all_segments.extend(chunk_segments)
-
-                try:
-                    os.remove(chunk_wav)
-                except Exception:
-                    pass
 
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -1266,26 +1534,16 @@ class Analyzer:
 
         # Setup cache
         self.asr_cache_dir.mkdir(parents=True, exist_ok=True)
-        video_md5 = self._get_file_md5(audio_path)
-        cache_key_prefix = f"{video_md5}_{model}_{language}"
+        cache_key_prefix = self._build_asr_cache_key_prefix(
+            "", audio_path, model, language
+        )
 
         # Build chunks
-        chunk_duration = self.asr_chunk_duration
-        overlap = self.asr_overlap_seconds
-        chunks = []
-        start = 0.0
-        chunk_idx = 0
-        while start < duration:
-            end = min(start + chunk_duration, duration)
-            chunks.append((chunk_idx, start, end))
-            chunk_idx += 1
-            if end >= duration:
-                break
-            start = end - overlap
+        chunks = self._build_asr_chunk_windows(duration)
 
         total = len(chunks)
         logging.info(
-            f"[whisper-cli] Processing {total} chunks (chunk_duration={chunk_duration}s, overlap={overlap}s)"
+            f"[whisper-cli] Processing {total} chunks (chunk_duration={self.asr_chunk_duration}s, overlap={self.asr_overlap_seconds}s)"
         )
 
         all_segments = []
@@ -1294,9 +1552,7 @@ class Analyzer:
 
         try:
             for idx, chunk_start, chunk_end in chunks:
-                cache_file = (
-                    self.asr_cache_dir / f"{cache_key_prefix}_chunk{idx:03d}.json"
-                )
+                cache_file = self._build_asr_chunk_cache_file(cache_key_prefix, idx)
                 chunk_span = chunk_end - chunk_start
                 chunk_label = (
                     f"chunk {idx + 1}/{total} "
@@ -1304,155 +1560,141 @@ class Analyzer:
                     f" -> {self._format_duration_mmss(chunk_end)}, "
                     f"len={self._format_duration_mmss(chunk_span)}]"
                 )
-
-                # Cache hit — skip processing
-                if cache_file.exists():
-                    try:
-                        with open(cache_file, "r", encoding="utf-8") as f:
-                            cached = json.load(f)
-                        if isinstance(cached, list) and len(cached) > 0:
-                            cached = self._normalize_cached_asr_segments(
-                                cached,
-                                chunk_start=chunk_start,
-                                chunk_duration=chunk_end - chunk_start,
-                            )
-                            logging.info(
-                                f"[whisper-cli] {chunk_label}: cache hit {cache_file.name} ({len(cached)} segments)"
-                            )
-                            all_segments.extend(cached)
-                            continue
-                        else:
-                            logging.warning(
-                                f"[whisper-cli] {chunk_label}: cache invalid ({cache_file.name}), re-processing"
-                            )
-                            cache_file.unlink(missing_ok=True)
-                    except Exception as e:
-                        logging.warning(
-                            f"[whisper-cli] {chunk_label}: cache read failed: {e}, re-processing"
-                        )
-                        cache_file.unlink(missing_ok=True)
-
-                logging.info(
-                    f"[whisper-cli] {chunk_label}: extracting audio for transcription"
-                )
-
-                # Cut chunk audio with ffmpeg
                 chunk_wav = os.path.join(tmp_dir, f"chunk_{idx:03d}.wav")
-                ffmpeg_cmd = [
-                    "ffmpeg",
-                    "-y",
-                    "-ss",
-                    str(chunk_start),
-                    "-t",
-                    str(chunk_end - chunk_start),
-                    "-i",
-                    audio_path,
-                    "-ar",
-                    "16000",
-                    "-ac",
-                    "1",
-                    chunk_wav,
-                ]
-                try:
-                    ffmpeg_result = subprocess.run(
-                        ffmpeg_cmd,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        timeout=120,
-                    )
-                    if ffmpeg_result.returncode != 0:
-                        logging.warning(
-                            f"[whisper-cli] {chunk_label}: ffmpeg extraction failed, skipping"
-                        )
-                        failed_chunks.append((idx, chunk_start, chunk_end))
-                        continue
-                except subprocess.TimeoutExpired:
-                    logging.warning(
-                        f"[whisper-cli] {chunk_label}: ffmpeg timeout, skipping"
-                    )
-                    failed_chunks.append((idx, chunk_start, chunk_end))
-                    continue
-
-                # Run whisper in isolated Process — reliable timeout via SIGTERM/SIGKILL
-                logging.info(
-                    f"[whisper-cli] {chunk_label}: starting transcription "
-                    f"(timeout={self.asr_segment_timeout}s, word_timestamps={self.whisper_word_timestamps})"
-                )
-                chunk_segments_raw = self._run_transcription_process_with_timeout(
-                    target_func=Analyzer._transcribe_chunk_whisper_cli,
-                    args=(
-                        chunk_wav,
-                        model,
-                        language,
-                        whisper_bin,
-                        idx + 1,
-                        total,
-                        self.whisper_word_timestamps,
-                        tmp_dir,
-                    ),
-                    timeout=self.asr_segment_timeout,
-                    chunk_display_idx=idx + 1,
-                    total_chunks=total,
-                )
-
-                if chunk_segments_raw is not None:
+                def _process_chunk():
                     logging.info(
-                        f"[whisper-cli] {chunk_label}: transcription successful, writing cache {cache_file.name}"
+                        f"[whisper-cli] {chunk_label}: extracting audio for transcription"
                     )
+
+                    ffmpeg_cmd = [
+                        "ffmpeg",
+                        "-y",
+                        "-ss",
+                        str(chunk_start),
+                        "-t",
+                        str(chunk_end - chunk_start),
+                        "-i",
+                        audio_path,
+                        "-ar",
+                        "16000",
+                        "-ac",
+                        "1",
+                        chunk_wav,
+                    ]
                     try:
-                        # Write segments to cache
-                        with open(cache_file, "w", encoding="utf-8") as f:
-                            json.dump(
-                                chunk_segments_raw, f, ensure_ascii=False, indent=2
-                            )
-                        all_segments.extend(chunk_segments_raw)
-                    except Exception as e:
-                        logging.error(
-                            f"[whisper-cli] {chunk_label}: failed to write cache {cache_file.name}: {e}"
+                        ffmpeg_result = subprocess.run(
+                            ffmpeg_cmd,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            timeout=120,
                         )
-                else:
-                    logging.error(
-                        f"[whisper-cli] {chunk_label}: transcription failed or timed out"
+                        if ffmpeg_result.returncode != 0:
+                            logging.warning(
+                                f"[whisper-cli] {chunk_label}: ffmpeg extraction failed, skipping"
+                            )
+                            return None
+                    except subprocess.TimeoutExpired:
+                        logging.warning(
+                            f"[whisper-cli] {chunk_label}: ffmpeg timeout, skipping"
+                        )
+                        return None
+
+                    logging.info(
+                        f"[whisper-cli] {chunk_label}: starting transcription "
+                        f"(timeout={self.asr_segment_timeout}s, word_timestamps={self.whisper_word_timestamps})"
                     )
-                    failed_chunks.append((idx, chunk_start, chunk_end))
+                    chunk_segments_raw = self._run_transcription_process_with_timeout(
+                        target_func=Analyzer._transcribe_chunk_whisper_cli,
+                        args=(
+                            chunk_wav,
+                            model,
+                            language,
+                            whisper_bin,
+                            idx + 1,
+                            total,
+                            self.whisper_word_timestamps,
+                            tmp_dir,
+                        ),
+                        timeout=self.asr_segment_timeout,
+                        chunk_display_idx=idx + 1,
+                        total_chunks=total,
+                    )
+
                     try:
-                        os.remove(chunk_wav)
-                    except Exception:
-                        pass
+                        if chunk_segments_raw is None:
+                            logging.error(
+                                f"[whisper-cli] {chunk_label}: transcription failed or timed out"
+                            )
+                            return None
+
+                        chunk_segments = []
+                        cache_segments = []
+                        for seg in chunk_segments_raw:
+                            cache_words = []
+                            abs_words = []
+                            for w in seg.get("words", []):
+                                if not isinstance(w, dict):
+                                    continue
+                                cache_words.append(
+                                    {
+                                        "word": w.get("word", ""),
+                                        "start": round(w.get("start", 0), 3),
+                                        "end": round(w.get("end", 0), 3),
+                                    }
+                                )
+                                abs_words.append(
+                                    {
+                                        "word": w.get("word", ""),
+                                        "start": round(w.get("start", 0) + chunk_start, 3),
+                                        "end": round(w.get("end", 0) + chunk_start, 3),
+                                    }
+                                )
+
+                            cache_segments.append(
+                                {
+                                    "start": round(seg.get("start", 0), 3),
+                                    "end": round(seg.get("end", 0), 3),
+                                    "text": seg.get("text", ""),
+                                    "words": cache_words,
+                                }
+                            )
+                            chunk_segments.append(
+                                {
+                                    "start": round(seg.get("start", 0) + chunk_start, 3),
+                                    "end": round(seg.get("end", 0) + chunk_start, 3),
+                                    "text": seg.get("text", ""),
+                                    "words": abs_words,
+                                }
+                            )
+
+                        logging.info(
+                            f"[whisper-cli] {chunk_label}: transcription successful, prepared {len(chunk_segments)} segments"
+                        )
+                        return chunk_segments, cache_segments
+                    finally:
+                        chunk_json = os.path.splitext(chunk_wav)[0] + ".json"
+                        for tmp_f in [chunk_wav, chunk_json]:
+                            try:
+                                os.remove(tmp_f)
+                            except Exception:
+                                pass
+
+                chunk_segments = self._run_cached_asr_chunk(
+                    "whisper-cli",
+                    cache_file,
+                    chunk_label,
+                    chunk_start,
+                    chunk_end - chunk_start,
+                    _process_chunk,
+                )
+                if chunk_segments is None:
+                    failed_chunks.append((idx, chunk_start, chunk_end))
                     continue
-
-                # Shift timestamps by chunk_start offset
-                chunk_segments = []
-                for seg in chunk_segments_raw:
-                    seg["start"] = round(seg.get("start", 0) + chunk_start, 3)
-                    seg["end"] = round(seg.get("end", 0) + chunk_start, 3)
-                    if "words" in seg:
-                        for w in seg["words"]:
-                            w["start"] = round(w.get("start", 0) + chunk_start, 3)
-                            w["end"] = round(w.get("end", 0) + chunk_start, 3)
-                    chunk_segments.append(seg)
-
-                # Write cache
-                try:
-                    with open(cache_file, "w", encoding="utf-8") as f:
-                        json.dump(chunk_segments, f, ensure_ascii=False, indent=2)
-                except Exception as e:
-                    logging.warning(
-                        f"[whisper-cli] {chunk_label}: cache write failed: {e}"
-                    )
 
                 all_segments.extend(chunk_segments)
                 logging.info(
                     f"[whisper-cli] {chunk_label}: completed with {len(chunk_segments)} segments"
                 )
-
-                # Clean up chunk wav and json
-                chunk_json = os.path.splitext(chunk_wav)[0] + ".json"
-                for tmp_f in [chunk_wav, chunk_json]:
-                    try:
-                        os.remove(tmp_f)
-                    except Exception:
-                        pass
 
         finally:
             try:
