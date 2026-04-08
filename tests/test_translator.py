@@ -346,6 +346,58 @@ class TestTranslatorFunctionality:
         assert result == ["google:line-1", "google:line-2"]
         assert mock_google.call_count == 2
 
+    def test_siliconflow_chunk_packing_respects_char_budget(self):
+        translator = Translator()
+        texts = ["aaaa", "bbbb", "cccc", "dddd", "eeee"]
+
+        with patch.object(
+            Translator,
+            "_get_siliconflow_translation_chunk_limits",
+            return_value=(10, 100),
+        ):
+            chunks = translator._build_siliconflow_translation_chunks(texts, "zh")
+
+        assert [len(chunk) for _, chunk in chunks] == [2, 2, 1]
+        assert [idx for idx, _ in chunks] == [0, 2, 4]
+
+    def test_siliconflow_chunk_packing_respects_max_items(self):
+        translator = Translator()
+        texts = ["a", "b", "c", "d", "e"]
+
+        with patch.object(
+            Translator,
+            "_get_siliconflow_translation_chunk_limits",
+            return_value=(100, 2),
+        ):
+            chunks = translator._build_siliconflow_translation_chunks(texts, "zh")
+
+        assert [len(chunk) for _, chunk in chunks] == [2, 2, 1]
+        assert [idx for idx, _ in chunks] == [0, 2, 4]
+
+    def test_siliconflow_chunk_limits_are_more_conservative_for_zh(self):
+        translator = Translator()
+
+        en_limits = translator._get_siliconflow_translation_chunk_limits("en")
+        zh_limits = translator._get_siliconflow_translation_chunk_limits("zh")
+
+        assert zh_limits[0] < en_limits[0]
+        assert zh_limits[1] <= en_limits[1]
+        assert zh_limits == (800, 14)
+
+    def test_siliconflow_chunk_packing_shrinks_for_long_texts(self):
+        translator = Translator()
+        texts = ["x" * 100 for _ in range(10)]
+
+        with patch.object(
+            Translator,
+            "_get_siliconflow_translation_chunk_limits",
+            return_value=(1000, 24),
+        ):
+            chunks = translator._build_siliconflow_translation_chunks(texts, "zh")
+
+        assert [len(chunk) for _, chunk in chunks] == [8, 2]
+        assert [idx for idx, _ in chunks] == [0, 8]
+
 
 class TestEnShortCircuit:
     """验证 _translate_segments 的 EN 短路逻辑：原文已是英文时不调用翻译后端。"""
@@ -414,4 +466,21 @@ class TestEnShortCircuit:
             assert res["start"] == orig["start"]
             assert res["end"] == orig["end"]
             assert res["text"] == orig["text"]
+
+    def test_en_short_circuit_tolerates_one_short_fragment(self):
+        """前 5 句里允许出现 1 条过短英文碎片，不应直接误判为非英文。"""
+        translator = self._make_translator()
+        segments = [
+            {"start": 0.0, "end": 1.0, "text": "Welcome to the show everyone."},
+            {"start": 1.0, "end": 2.0, "text": "I think we should continue."},
+            {"start": 2.0, "end": 3.0, "text": "AI."},
+            {"start": 3.0, "end": 4.0, "text": "This is the main point."},
+            {"start": 4.0, "end": 5.0, "text": "Let's move on."},
+        ]
+
+        with patch.object(Translator, "_batch_translate") as mock_batch:
+            result = translator._translate_segments(segments, target_lang="en")
+
+        mock_batch.assert_not_called()
+        assert [s["text"] for s in result] == [s["text"] for s in segments]
     

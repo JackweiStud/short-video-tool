@@ -126,6 +126,32 @@ class TestAnalyzerFunctionality:
         analyze_audio.assert_called_once()
         detect_scenes.assert_called_once()
 
+    def test_merge_asr_segments_deduplicates_overlapping_duplicates(self):
+        analyzer = Analyzer()
+        segments = [
+            {
+                "start": 295.000,
+                "end": 296.935,
+                "text": "you need to think through all these things, not just the product.",
+            },
+            {
+                "start": 295.639,
+                "end": 297.132,
+                "text": "you need to think through all these things, not just the product.",
+            },
+            {
+                "start": 297.400,
+                "end": 298.000,
+                "text": "If it were.",
+            },
+        ]
+
+        merged = analyzer._merge_asr_segments(segments)
+
+        assert len(merged) == 2
+        assert merged[0]["text"] == "you need to think through all these things, not just the product."
+        assert merged[1]["text"] == "If it were."
+
     def test_summary_only_analysis_skips_other_steps(self, temp_dir):
         analyzer = Analyzer()
         video_path = os.path.join(temp_dir, "sample.mp4")
@@ -163,7 +189,8 @@ class TestAnalyzerFunctionality:
             "caveats": ["边界一", "边界二"],
             "best_for": ["产品经理", "内容创作者"],
             "keywords": ["AI", "总结", "视频"],
-            "x_post_copy": "Sam Altman 把创业讲得很直接：好想法、好产品、好团队、好执行。更重要的是，真正值得做的公司，往往一开始并不被看好。如果你在想怎么判断一个创意值不值得做，这支视频值得看。",
+            "x_post_copy_zh": "Sam Altman 把创业讲得很直接：好想法、好产品、好团队、好执行。更重要的是，真正值得做的公司，往往一开始并不被看好。如果你在想怎么判断一个创意值不值得做，这支视频值得看。",
+            "x_post_copy_en": "Sam Altman breaks down startup success into four things: a good idea, a great product, a strong team, and solid execution. The best ideas often look bad at first. If you're trying to judge whether a startup idea is worth pursuing, this video is worth your time.",
         }
 
         def fake_post(*args, **kwargs):
@@ -205,4 +232,7 @@ class TestAnalyzerFunctionality:
         assert "## 对用户的启示与价值" in content
         assert "## 适用边界" in content
         assert "## X Post 文案" in content
+        assert "### 中文" in content
+        assert "### English" in content
         assert "Sam Altman 把创业讲得很直接" in content
+        assert "Sam Altman breaks down startup success" in content

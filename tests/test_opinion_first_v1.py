@@ -12,6 +12,7 @@ import os
 import types
 import json
 import re
+import requests
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -167,13 +168,64 @@ def test_segment_by_topic_fallback_invalid_json():
     fake_response.json.return_value = {
         "choices": [{"message": {"content": "not json at all"}}]
     }
-    asr = [{"start": 0.0, "end": 10.0, "text": "hello"}]
-    with patch("requests.post", return_value=fake_response):
+    asr = [
+        {"start": 0.0, "end": 45.2, "text": "AI will eliminate jobs."},
+        {"start": 45.2, "end": 120.5, "text": "Learn to adapt."},
+    ]
+    with patch("requests.post", return_value=fake_response), patch("time.sleep"):
         segs, summaries, meta = a._segment_by_topic(asr, clip_strategy="opinion")
     assert segs == []
     assert meta["segmentation_effective"] is False
     assert meta["fallback_reason"] == "llm_invalid_json"
     print("PASS: test_segment_by_topic_fallback_invalid_json")
+
+
+def test_segment_by_topic_retries_invalid_json_then_succeeds():
+    a = make_analyzer()
+    invalid_response = MagicMock()
+    invalid_response.status_code = 200
+    invalid_response.json.return_value = {
+        "choices": [{"message": {"content": "not json at all"}}]
+    }
+    valid_response = MagicMock()
+    valid_response.status_code = 200
+    valid_response.json.return_value = {
+        "choices": [{"message": {"content": json.dumps({"segments": DUMMY_SEGMENTS})}}]
+    }
+    asr = [
+        {"start": 0.0, "end": 45.2, "text": "AI will eliminate jobs."},
+        {"start": 45.2, "end": 120.5, "text": "Learn to adapt."},
+    ]
+    with patch("requests.post", side_effect=[invalid_response, valid_response]) as post, patch("time.sleep"):
+        segs, summaries, meta = a._segment_by_topic(asr, clip_strategy="opinion")
+    assert post.call_count == 2
+    assert len(segs) == 2
+    assert meta["segmentation_effective"] is True
+    assert meta["fallback_reason"] == ""
+    print("PASS: test_segment_by_topic_retries_invalid_json_then_succeeds")
+
+
+def test_segment_by_topic_retries_request_exception_then_succeeds():
+    a = make_analyzer()
+    valid_response = MagicMock()
+    valid_response.status_code = 200
+    valid_response.json.return_value = {
+        "choices": [{"message": {"content": json.dumps({"segments": DUMMY_SEGMENTS})}}]
+    }
+    asr = [
+        {"start": 0.0, "end": 45.2, "text": "AI will eliminate jobs."},
+        {"start": 45.2, "end": 120.5, "text": "Learn to adapt."},
+    ]
+    with patch(
+        "requests.post",
+        side_effect=[requests.exceptions.SSLError("boom"), valid_response],
+    ) as post, patch("time.sleep"):
+        segs, summaries, meta = a._segment_by_topic(asr, clip_strategy="opinion")
+    assert post.call_count == 2
+    assert len(segs) == 2
+    assert meta["segmentation_effective"] is True
+    assert meta["fallback_reason"] == ""
+    print("PASS: test_segment_by_topic_retries_request_exception_then_succeeds")
 
 
 # ---------------------------------------------------------------------------

@@ -1397,20 +1397,65 @@ class Analyzer:
     def _merge_asr_segments(self, segments: list) -> list:
         """
         Merge ASR segments from multiple chunks, deduplicating overlap regions.
-        Strategy: sort by start time, remove segments whose time range is fully
-        covered by a later segment (overlap zone — keep the later one).
+        Strategy: sort by start time and drop near-duplicate segments that
+        overlap heavily with the previous kept segment. When two segments have
+        almost identical text, keep the one with broader coverage.
         """
         if not segments:
             return []
 
-        sorted_segs = sorted(segments, key=lambda s: s["start"])
+        def _norm_text(text: str) -> str:
+            return re.sub(r"[\s\W_]+", "", (text or "").lower(), flags=re.UNICODE)
 
-        seen = {}
+        sorted_segs = sorted(
+            [seg for seg in segments if isinstance(seg, dict)],
+            key=lambda s: (float(s.get("start", 0.0)), float(s.get("end", 0.0))),
+        )
+
+        deduped = []
         for seg in sorted_segs:
-            key = (round(seg["start"] * 2) / 2, seg["text"][:30])
-            seen[key] = seg
+            text = str(seg.get("text", "")).strip()
+            if not text:
+                continue
 
-        deduped = sorted(seen.values(), key=lambda s: s["start"])
+            current = dict(seg)
+            current_start = float(current.get("start", 0.0))
+            current_end = float(current.get("end", 0.0))
+            current_norm = _norm_text(text)
+
+            if not deduped:
+                deduped.append(current)
+                continue
+
+            prev = deduped[-1]
+            prev_text = str(prev.get("text", "")).strip()
+            prev_start = float(prev.get("start", 0.0))
+            prev_end = float(prev.get("end", 0.0))
+            prev_norm = _norm_text(prev_text)
+            overlap = min(prev_end, current_end) - max(prev_start, current_start)
+            gap = current_start - prev_end
+            similarity = (
+                SequenceMatcher(None, prev_norm, current_norm).ratio()
+                if prev_norm and current_norm
+                else 0.0
+            )
+
+            if prev_norm and current_norm and prev_norm == current_norm and (overlap > 0 or gap <= 1.0):
+                prev_dur = max(0.0, prev_end - prev_start)
+                curr_dur = max(0.0, current_end - current_start)
+                if curr_dur > prev_dur + 0.15:
+                    deduped[-1] = current
+                continue
+
+            if similarity >= 0.97 and overlap > 0 and gap <= 1.0:
+                prev_dur = max(0.0, prev_end - prev_start)
+                curr_dur = max(0.0, current_end - current_start)
+                if curr_dur > prev_dur + 0.25:
+                    deduped[-1] = current
+                continue
+
+            deduped.append(current)
+
         return deduped
 
     @staticmethod
@@ -2793,7 +2838,8 @@ Additional opinion guidance:
 - `core_points` 必须写成“视频真正展开过的关键判断或方法”，不要写目录式标题
 - `evidence_points` 应提炼 2-4 条视频里明确表达过的关键判断、标准、例子或论据，不要写空泛套话
 - `caveats` 用于总结这套观点成立的前提、边界或未覆盖的问题；如果证据不足可以为空数组
-- `x_post_copy` 用一小段可直接发到 X 的中文文案总结这支视频，要求有吸引力但不标题党，不要编造，不要使用 emoji，不要堆砌 hashtags
+- `x_post_copy_zh` 用一小段可直接发到 X 的中文文案总结这支视频，要求有吸引力但不标题党，不要编造，不要使用 emoji，不要堆砌 hashtags
+- `x_post_copy_en` 用一段对应的地道美式英文翻译，语气自然，避免直译腔
 - 如果视频里没有足够证据支持“启示”或“建议”，宁可少写，也不要用通用创业鸡汤或常识性废话补齐
 
 视频文件名: {video_name}
@@ -2824,7 +2870,8 @@ Transcript:
   "caveats": ["适用边界1", "适用边界2"],
   "best_for": ["适合的人群1", "适合的人群2"],
   "keywords": ["关键词1", "关键词2", "关键词3"],
-  "x_post_copy": "一段可直接发布到 X 的中文短文，和一段对应的地道美式英文翻译"
+  "x_post_copy_zh": "一段可直接发布到 X 的中文短文",
+  "x_post_copy_en": "A natural American English version of the same post"
 }}
 
 规则：
@@ -2835,7 +2882,8 @@ Transcript:
 - caveats 0-3 条；没有明确边界信息时可以为空数组
 - best_for 1-3 条；只能写视频内容直接支持的受众或使用场景，不要猜年龄、身份阶段或职业画像
 - keywords 3-8 个
-- x_post_copy 1 段，建议 80-180 字，像一条真人会发的高质量 X 帖子；要有信息密度和传播性，但不能夸张失真
+- x_post_copy_zh 1 段，建议 80-180 字，像一条真人会发的高质量 X 帖子；要有信息密度和传播性，但不能夸张失真
+- x_post_copy_en 1 段，与中文内容含义一致，但不要求逐字直译，优先自然流畅
 - title 不要过长，不要夸张，不要营销腔
 - 只输出 JSON
 """
@@ -2968,7 +3016,10 @@ Transcript:
                 for item in parsed.get("keywords", [])
                 if str(item).strip()
             ],
-            "x_post_copy": str(parsed.get("x_post_copy", "")).strip(),
+            "x_post_copy_zh": str(
+                parsed.get("x_post_copy_zh", parsed.get("x_post_copy", ""))
+            ).strip(),
+            "x_post_copy_en": str(parsed.get("x_post_copy_en", "")).strip(),
         }
 
     def _render_video_summary_markdown(
@@ -3046,7 +3097,13 @@ Transcript:
                 "",
                 "## X Post 文案",
                 "",
-                summary_data.get("x_post_copy", "").strip() or "暂无",
+                "### 中文",
+                "",
+                summary_data.get("x_post_copy_zh", "").strip() or "暂无",
+                "",
+                "### English",
+                "",
+                summary_data.get("x_post_copy_en", "").strip() or "暂无",
             ]
         )
 
@@ -3096,9 +3153,13 @@ Transcript:
             "max_tokens": int(0.95 * 8192),  # DeepSeek-V3 max output is 8K, use 90%
         }
 
+        max_attempts = 4
         response = None
+        parsed = None
         last_error = None
-        for attempt in range(1, 3):
+        last_failure_reason = "llm_request_failed"
+
+        for attempt in range(1, max_attempts + 1):
             try:
                 response = requests.post(
                     f"{self.llm_base_url}/chat/completions",
@@ -3106,9 +3167,9 @@ Transcript:
                     json=payload,
                     timeout=self.llm_timeout,
                 )
-                break
             except requests.RequestException as e:
                 last_error = e
+                last_failure_reason = "llm_request_failed"
                 logging.warning(
                     "LLM request attempt %s failed for window %s-%s: %s",
                     attempt,
@@ -3116,19 +3177,86 @@ Transcript:
                     window_end,
                     e,
                 )
-                if attempt < 2:
-                    time.sleep(1.5 * attempt)
+                if attempt < max_attempts:
+                    time.sleep(1.5 * (2 ** (attempt - 1)))
+                continue
 
-        if response is None:
-            raise last_error if last_error else RuntimeError("LLM request failed")
+            if response.status_code != 200:
+                if response.status_code in {429} or response.status_code >= 500:
+                    last_error = RuntimeError(
+                        f"LLM API error {response.status_code}: {response.text}"
+                    )
+                    last_failure_reason = f"llm_api_error_{response.status_code}"
+                    logging.warning(
+                        "LLM API attempt %s returned retryable status for window %s-%s: %s - %s",
+                        attempt,
+                        window_start,
+                        window_end,
+                        response.status_code,
+                        response.text,
+                    )
+                    if attempt < max_attempts:
+                        time.sleep(1.5 * (2 ** (attempt - 1)))
+                    continue
 
-        if response.status_code != 200:
-            logging.error(
-                "LLM API error for window %s-%s: %s - %s",
+                logging.error(
+                    "LLM API error for window %s-%s: %s - %s",
+                    window_start,
+                    window_end,
+                    response.status_code,
+                    response.text,
+                )
+                return {
+                    "window_index": window_index,
+                    "window_start": window_start,
+                    "window_end": window_end,
+                    "segments": [],
+                    "has_opinion_fields": False,
+                    "fallback_reason": f"llm_api_error_{response.status_code}",
+                }
+
+            try:
+                result = response.json()
+                content = result.get("choices", [])[0].get("message", {}).get("content", "")
+            except (ValueError, IndexError, AttributeError, TypeError) as e:
+                last_error = e
+                last_failure_reason = "llm_invalid_json"
+                logging.warning(
+                    "LLM response decode attempt %s failed for window %s-%s: %s",
+                    attempt,
+                    window_start,
+                    window_end,
+                    e,
+                )
+                if attempt < max_attempts:
+                    time.sleep(1.5 * (2 ** (attempt - 1)))
+                continue
+
+            parsed = self._extract_json_object(content)
+            if parsed:
+                break
+
+            parsed = None
+            last_error = RuntimeError("LLM invalid JSON content")
+            last_failure_reason = "llm_invalid_json"
+            logging.warning(
+                "No valid JSON found in LLM response for window %s-%s (attempt %s/%s)",
                 window_start,
                 window_end,
-                response.status_code,
-                response.text,
+                attempt,
+                max_attempts,
+            )
+            if attempt < max_attempts:
+                time.sleep(1.5 * (2 ** (attempt - 1)))
+            continue
+
+        if parsed is None:
+            logging.error(
+                "LLM request failed for window %s-%s after %s attempts: %s",
+                window_start,
+                window_end,
+                max_attempts,
+                last_error,
             )
             return {
                 "window_index": window_index,
@@ -3136,25 +3264,7 @@ Transcript:
                 "window_end": window_end,
                 "segments": [],
                 "has_opinion_fields": False,
-                "fallback_reason": f"llm_api_error_{response.status_code}",
-            }
-
-        result = response.json()
-        content = result.get("choices", [])[0].get("message", {}).get("content", "")
-        parsed = self._extract_json_object(content)
-        if not parsed:
-            logging.error(
-                "No valid JSON found in LLM response for window %s-%s",
-                window_start,
-                window_end,
-            )
-            return {
-                "window_index": window_index,
-                "window_start": window_start,
-                "window_end": window_end,
-                "segments": [],
-                "has_opinion_fields": False,
-                "fallback_reason": "llm_invalid_json",
+                "fallback_reason": last_failure_reason,
             }
 
         segments_data = parsed.get("segments", [])

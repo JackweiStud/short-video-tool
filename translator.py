@@ -79,7 +79,7 @@ def _looks_like_english_sentence(text: str) -> bool:
         return False
 
     latin_count = _latin_count(text)
-    if latin_count < 6:
+    if latin_count < 4:
         return False
 
     # Acronyms or model names like "NBA" / "NVIDIA" are acceptable inside ZH output.
@@ -607,12 +607,16 @@ class Translator:
         # Bug fix: 若 target_lang 为 en 且原文已是英文，直接短路返回原文，不走翻译调用
         if target_lang == "en":
             texts_sample = [seg['text'] for seg in segments[:5] if seg.get('text', '').strip()]
-            if texts_sample and all(_looks_like_english_sentence(t) for t in texts_sample):
-                logging.info(
-                    "[Translator] EN short-circuit: 原文已是英文（采样 %d 句全部通过），跳过翻译调用",
-                    len(texts_sample)
-                )
-                return [seg.copy() for seg in segments]
+            if texts_sample:
+                english_hits = sum(1 for t in texts_sample if _looks_like_english_sentence(t))
+                required_hits = len(texts_sample) if len(texts_sample) < 4 else 4
+                if english_hits >= required_hits:
+                    logging.info(
+                        "[Translator] EN short-circuit: 原文大概率已是英文（采样 %d 句，%d 句通过），跳过翻译调用",
+                        len(texts_sample),
+                        english_hits,
+                    )
+                    return [seg.copy() for seg in segments]
 
         # Prepare batch translation
         texts = [seg['text'] for seg in segments]
@@ -713,70 +717,113 @@ Keep the same numbering format. Only output the translated texts, no explanation
         """
         Batch translate using Siliconflow / DeepSeek-V3 (OpenAI-compatible API).
 
-        Auto-chunks large batches (>50 segments) to stay within token limits.
+        Auto-packs chunks by character budget to stay within token limits.
         Uses concurrent processing for significant speedup (4-6x faster).
         """
-        # Keep chunks small because fragmented subtitle lines are easy for the
-        # model to merge or comment on.
-        CHUNK_SIZE = 12
-        if len(texts) > CHUNK_SIZE:
-            logging.info(
-                f"[Siliconflow] Large batch ({len(texts)} segments), "
-                f"splitting into chunks of {CHUNK_SIZE}"
+        chunks = self._build_siliconflow_translation_chunks(texts, target_lang)
+        if not chunks:
+            return []
+
+        if len(chunks) == 1:
+            return self._translate_siliconflow_chunk(chunks[0][1], target_lang)
+
+        char_budget, max_items = self._get_siliconflow_translation_chunk_limits(target_lang)
+        logging.info(
+            f"[Siliconflow] Large batch ({len(texts)} segments), "
+            f"adaptive packing into {len(chunks)} chunks "
+            f"(char_budget={char_budget}, max_items={max_items})"
+        )
+
+        # Determine concurrency based on CPU count and API limits.
+        # Default to 6 workers to improve throughput on larger subtitle batches.
+        max_workers = min(6, os.cpu_count() or 4)
+
+        logging.info(
+            f"[Siliconflow] Processing {len(chunks)} chunks with {max_workers} concurrent workers"
+        )
+
+        results = [None] * len(texts)
+
+        def process_chunk(start_idx, chunk, chunk_num):
+            try:
+                chunk_result = self._translate_siliconflow_chunk(chunk, target_lang)
+                return start_idx, chunk_result, None, chunk_num
+            except Exception as e:
+                logging.error(f"[Siliconflow] Chunk {chunk_num}/{len(chunks)} failed: {e}")
+                return start_idx, None, e, chunk_num
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(process_chunk, start_idx, chunk, chunk_num): (start_idx, chunk_num)
+                for chunk_num, (start_idx, chunk) in enumerate(chunks, 1)
+            }
+
+            completed = 0
+            for future in as_completed(futures):
+                idx, chunk_result, error, chunk_num = future.result()
+
+                if chunk_result:
+                    for i, translation in enumerate(chunk_result):
+                        results[idx + i] = translation
+                    completed += 1
+                    logging.info(
+                        f"[Siliconflow] Chunk {chunk_num}/{len(chunks)} done "
+                        f"({completed}/{len(chunks)} completed, {len(chunk_result)} segments)"
+                    )
+                else:
+                    logging.error(f"[Siliconflow] Chunk {chunk_num}/{len(chunks)} failed")
+
+        return [r for r in results if r is not None]
+
+    def _get_siliconflow_translation_chunk_limits(self, target_lang: str) -> tuple[int, int]:
+        """Return (char_budget, max_items) for adaptive Siliconflow translation packing."""
+        if target_lang == "en":
+            return 1100, 24
+        return 800, 14
+
+    def _build_siliconflow_translation_chunks(
+        self, texts: List[str], target_lang: str
+    ) -> List[tuple[int, List[str]]]:
+        """Pack texts into adaptive chunks using char budget and item caps."""
+        if not texts:
+            return []
+
+        char_budget, max_items = self._get_siliconflow_translation_chunk_limits(target_lang)
+        normalized_lengths = [len((text or "").strip()) for text in texts]
+        if normalized_lengths:
+            avg_chars = sum(normalized_lengths) / len(normalized_lengths)
+            max_chars = max(normalized_lengths)
+            if max_chars >= 180 or avg_chars >= 70:
+                char_budget = max(600, int(char_budget * 0.8))
+                max_items = max(8, int(max_items * 0.75))
+            elif max_chars >= 120 or avg_chars >= 45:
+                char_budget = max(800, int(char_budget * 0.9))
+                max_items = max(10, int(max_items * 0.85))
+        chunks: List[tuple[int, List[str]]] = []
+        current: List[str] = []
+        current_chars = 0
+        chunk_start_idx = 0
+
+        for idx, text in enumerate(texts):
+            normalized = (text or "").strip()
+            item_chars = len(normalized)
+
+            should_flush = bool(current) and (
+                current_chars + item_chars > char_budget or len(current) >= max_items
             )
+            if should_flush:
+                chunks.append((chunk_start_idx, current))
+                current = []
+                current_chars = 0
+                chunk_start_idx = idx
 
-            # Split into chunks
-            chunks = []
-            for i in range(0, len(texts), CHUNK_SIZE):
-                chunks.append((i, texts[i:i + CHUNK_SIZE]))
+            current.append(text)
+            current_chars += item_chars
 
-            total_chunks = len(chunks)
+        if current:
+            chunks.append((chunk_start_idx, current))
 
-            # Determine concurrency based on CPU count and API limits.
-            # Default to 6 workers to improve throughput on larger subtitle batches.
-            max_workers = min(6, os.cpu_count() or 4)
-
-            logging.info(
-                f"[Siliconflow] Processing {total_chunks} chunks with {max_workers} concurrent workers"
-            )
-
-            # Concurrent processing
-            results = [None] * len(texts)
-
-            def process_chunk(chunk_data):
-                idx, chunk = chunk_data
-                chunk_num = idx // CHUNK_SIZE + 1
-                try:
-                    chunk_result = self._translate_siliconflow_chunk(chunk, target_lang)
-                    return idx, chunk_result, None
-                except Exception as e:
-                    logging.error(f"[Siliconflow] Chunk {chunk_num}/{total_chunks} failed: {e}")
-                    return idx, None, e
-
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = {executor.submit(process_chunk, chunk_data): chunk_data for chunk_data in chunks}
-
-                completed = 0
-                for future in as_completed(futures):
-                    idx, chunk_result, error = future.result()
-                    chunk_num = idx // CHUNK_SIZE + 1
-
-                    if chunk_result:
-                        # Fill results at correct positions
-                        for i, translation in enumerate(chunk_result):
-                            results[idx + i] = translation
-                        completed += 1
-                        logging.info(
-                            f"[Siliconflow] Chunk {chunk_num}/{total_chunks} done "
-                            f"({completed}/{total_chunks} completed, {len(chunk_result)} segments)"
-                        )
-                    else:
-                        logging.error(f"[Siliconflow] Chunk {chunk_num}/{total_chunks} failed")
-
-            # Filter out None values (failed chunks)
-            return [r for r in results if r is not None]
-
-        return self._translate_siliconflow_chunk(texts, target_lang)
+        return chunks
 
     def _translate_siliconflow_chunk(self, texts: List[str], target_lang: str) -> List[str]:
         """Translate one chunk, then degrade to smaller chunks / lines on failure."""
@@ -811,14 +858,16 @@ Keep the same numbering format. Only output the translated texts, no explanation
         base_system_prompt = (
             f"你是专业字幕翻译器。"
             f"输入是一个 JSON array，包含 {n} 个字幕片段字符串。"
-            f"输出必须是一个合法 JSON array，长度也必须恰好为 {n}。"
-            f"每个数组元素对应输入中的同索引元素。"
-            f"禁止合并、拆分、跳过、补写、解释、注释、占位说明、Markdown、代码块。"
+            f"输出必须是一个合法 JSON array，长度必须严格等于 {n}，且顺序必须与输入完全一致。"
+            f"每个输入元素必须且只能对应一个输出元素，严格 1:1 对齐。"
+            f"禁止合并、拆分、跳过、漏项、补写、解释、注释、占位说明、Markdown、代码块。"
             f"即使某一行很短，也必须单独翻译成一个数组元素。"
+            f"即使某一句很长，也不能拆成多个输出元素。"
             f"翻译目标语言是 {lang_name}，要自然、简洁、适合字幕阅读。"
         )
         base_user_prompt = (
             f"请将下面这个 JSON array 逐元素翻译为 {lang_name}。"
+            f"你必须保留与输入相同的条目数和顺序，不能合并、拆分或漏掉任何条目。"
             f"只返回 JSON array，不要返回其他内容：\n\n{numbered}"
         )
 

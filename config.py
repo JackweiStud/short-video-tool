@@ -337,22 +337,22 @@ class Config:
     
     # ==================== 字幕长度限制 (Subtitle Length Limits) ====================
     max_en_chars_vertical: int = field(
-        default_factory=lambda: int(os.getenv("MAX_EN_CHARS_VERTICAL", "40"))
+        default_factory=lambda: int(os.getenv("MAX_EN_CHARS_VERTICAL", "35"))
     )
     """垂直视频 (9:16) 英文字幕最大字符数"""
 
     max_zh_chars_vertical: int = field(
-        default_factory=lambda: int(os.getenv("MAX_ZH_CHARS_VERTICAL", "20"))
+        default_factory=lambda: int(os.getenv("MAX_ZH_CHARS_VERTICAL", "25"))
     )
     """垂直视频 (9:16) 中文字幕最大字符数"""
 
     max_en_chars_horizontal: int = field(
-        default_factory=lambda: int(os.getenv("MAX_EN_CHARS_HORIZONTAL", "60"))
+        default_factory=lambda: int(os.getenv("MAX_EN_CHARS_HORIZONTAL", "50"))
     )
     """水平视频 (16:9) 英文字幕最大字符数"""
 
     max_zh_chars_horizontal: int = field(
-        default_factory=lambda: int(os.getenv("MAX_ZH_CHARS_HORIZONTAL", "30"))
+        default_factory=lambda: int(os.getenv("MAX_ZH_CHARS_HORIZONTAL", "35"))
     )
     """水平视频 (16:9) 中文字幕最大字符数"""
 
