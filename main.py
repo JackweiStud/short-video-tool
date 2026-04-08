@@ -545,14 +545,14 @@ def main():
         logging.info("Step 2/5: Analyzing video...")
         logging.info("=" * 70)
 
-        analyzer = Analyzer(config=config)
-
         # Skip topic segmentation if --no-clip is specified
         if args.no_clip:
             logging.info("--no-clip mode: skipping topic segmentation (not needed for full video)")
             # Temporarily disable topic segmentation for this analysis
             original_enable_topic = config.enable_topic_segmentation
             config.enable_topic_segmentation = False
+
+        analyzer = Analyzer(config=config)
 
         analysis_result = analyzer.analyze_video(
             video_path=video_path,

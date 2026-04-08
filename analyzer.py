@@ -10,7 +10,8 @@ import shutil
 from multiprocessing import Queue, set_start_method
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Dict
+from difflib import SequenceMatcher
 
 import librosa
 import numpy as np
@@ -367,6 +368,230 @@ class Analyzer:
             )
             return self._run_asr_whisper_cli(audio_path, model, language)
 
+    def _remove_repetitive_segments(self, segments: List[Dict], similarity_threshold: float = 0.85) -> List[Dict]:
+        """
+        Remove repetitive ASR segments caused by Whisper hallucination.
+
+        Strategy: When detecting a repetition zone, merge all repetitive segments
+        into a single segment covering the entire time range. This preserves
+        timeline coverage while removing redundant text.
+
+        Args:
+            segments: List of ASR segments with 'text', 'start', 'end'
+            similarity_threshold: Text similarity ratio (0-1) above which segments are considered repetitive
+
+        Returns:
+            Filtered list of segments with repetitions merged
+        """
+        if not segments:
+            return segments
+
+        filtered = []
+        prev_text = None
+        repetition_zone_segments = []  # Collect segments in repetition zone
+        in_repetition_zone = False
+
+        for seg in segments:
+            text = seg.get('text', '').strip()
+
+            if not text:
+                continue
+
+            # Check if this segment contains internal repetition (hallucination pattern)
+            has_internal_rep = self._has_internal_repetition(text)
+
+            # Calculate similarity with previous segment
+            similarity = 0.0
+            if prev_text:
+                similarity = SequenceMatcher(None, prev_text.lower(), text.lower()).ratio()
+
+            # Check if we're in or entering a repetition zone
+            is_repetitive = has_internal_rep or (similarity >= similarity_threshold and prev_text)
+
+            if is_repetitive:
+                if not in_repetition_zone:
+                    # Entering repetition zone - start collecting
+                    in_repetition_zone = True
+                    repetition_zone_segments = [seg]
+                    logging.debug(f"Entering repetition zone at {seg['start']:.1f}s")
+                else:
+                    # Already in repetition zone - add to collection
+                    repetition_zone_segments.append(seg)
+            else:
+                # Not repetitive
+                if in_repetition_zone:
+                    # Exiting repetition zone - merge collected segments
+                    if repetition_zone_segments:
+                        merged = self._merge_repetitive_segments(repetition_zone_segments)
+                        filtered.append(merged)
+                        logging.warning(
+                            f"Merged {len(repetition_zone_segments)} repetitive segments "
+                            f"into one ({merged['start']:.1f}-{merged['end']:.1f}s)"
+                        )
+                    repetition_zone_segments = []
+                    in_repetition_zone = False
+
+                # Add normal segment
+                filtered.append(seg)
+
+            prev_text = text
+
+        # Handle case where we end in a repetition zone
+        if in_repetition_zone and repetition_zone_segments:
+            merged = self._merge_repetitive_segments(repetition_zone_segments)
+            filtered.append(merged)
+            logging.warning(
+                f"Merged {len(repetition_zone_segments)} repetitive segments at end "
+                f"into one ({merged['start']:.1f}-{merged['end']:.1f}s)"
+            )
+
+        removed_count = len(segments) - len(filtered)
+        if removed_count > 0:
+            logging.info(f"[ASR Post-processing] Merged {removed_count} repetitive segments")
+
+        return filtered
+
+    def _merge_repetitive_segments(self, segments: List[Dict]) -> Dict:
+        """
+        Merge multiple repetitive segments into one.
+
+        Takes the text from the first segment (usually the cleanest),
+        and spans the time range from first start to last end.
+
+        Args:
+            segments: List of segments to merge
+
+        Returns:
+            Single merged segment
+        """
+        if not segments:
+            return {}
+
+        if len(segments) == 1:
+            return segments[0]
+
+        # Use the first segment's text (usually least corrupted)
+        first_seg = segments[0]
+        last_seg = segments[-1]
+
+        # Extract the non-repetitive part of the text
+        text = first_seg['text'].strip()
+
+        # Try to clean up internal repetition by taking only the first occurrence
+        # Split by common sentence endings
+        sentences = []
+        current = []
+        for char in text:
+            current.append(char)
+            if char in '.!?':
+                sentence = ''.join(current).strip()
+                if sentence and sentence not in sentences:
+                    sentences.append(sentence)
+                current = []
+
+        if current:
+            sentence = ''.join(current).strip()
+            if sentence and sentence not in sentences:
+                sentences.append(sentence)
+
+        # If we found distinct sentences, use them; otherwise use original
+        if sentences:
+            cleaned_text = ' '.join(sentences)
+        else:
+            cleaned_text = text
+
+        merged = {
+            'start': first_seg['start'],
+            'end': last_seg['end'],
+            'text': cleaned_text,
+        }
+
+        # Preserve any additional keys from first segment
+        for key in first_seg:
+            if key not in merged:
+                merged[key] = first_seg[key]
+
+        return merged
+
+    def _has_internal_repetition(self, text: str, min_phrase_length: int = 15) -> bool:
+        """
+        Detect if a text segment contains repetitive phrases (hallucination pattern).
+
+        Args:
+            text: Text to check
+            min_phrase_length: Minimum character length for a phrase to be considered
+
+        Returns:
+            True if text contains significant internal repetition
+        """
+        # Method 1: Check for repeated complete sentences
+        sentences = []
+        current = []
+        for char in text:
+            current.append(char)
+            if char in '.!?':
+                sentence = ''.join(current).strip()
+                if len(sentence) >= min_phrase_length:
+                    sentences.append(sentence)
+                current = []
+
+        # Add remaining text as a sentence
+        if current:
+            sentence = ''.join(current).strip()
+            if len(sentence) >= min_phrase_length:
+                sentences.append(sentence)
+
+        # Check for repeated sentences
+        if len(sentences) >= 3:
+            from collections import Counter
+            sentence_counts = Counter(sentences)
+
+            # If any sentence appears 3+ times, it's likely hallucination
+            for sentence, count in sentence_counts.items():
+                if count >= 3:
+                    logging.debug(f"Found repeated sentence ({count}x): {sentence[:40]}...")
+                    return True
+
+        # Method 2: Check for repeated phrases (sliding window)
+        # Look for phrases that appear multiple times in the text
+        words = text.split()
+        if len(words) < 10:
+            return False
+
+        # Try different phrase lengths (4-8 words)
+        max_repetition_ratio = 0.0
+        for phrase_len in range(4, 9):
+            if len(words) < phrase_len * 2:
+                continue
+
+            phrase_counts = {}
+            for i in range(len(words) - phrase_len + 1):
+                phrase = ' '.join(words[i:i + phrase_len]).lower()
+                phrase_counts[phrase] = phrase_counts.get(phrase, 0) + 1
+
+            # Calculate repetition ratio: (repeated words) / (total words)
+            repeated_words = 0
+            for phrase, count in phrase_counts.items():
+                if count >= 2:
+                    # Each repetition beyond the first adds phrase_len words
+                    repeated_words += phrase_len * (count - 1)
+
+            repetition_ratio = repeated_words / len(words)
+            max_repetition_ratio = max(max_repetition_ratio, repetition_ratio)
+
+            # If any phrase appears 3+ times, it's definitely hallucination
+            for phrase, count in phrase_counts.items():
+                if count >= 3:
+                    logging.debug(f"Found repeated phrase ({count}x, {phrase_len} words): {phrase[:40]}...")
+                    return True
+
+        # If more than 40% of the text is repetitive, it's likely hallucination
+        if max_repetition_ratio > 0.4:
+            logging.debug(f"High repetition ratio: {max_repetition_ratio:.1%}")
+            return True
+
+        return False
+
     def _run_asr_mlx_whisper(
         self, audio_path: str, model: str = "medium", language: str = "en"
     ) -> list:
@@ -392,13 +617,27 @@ class Analyzer:
             logging.info(f"[mlx-whisper] Transcribing audio with Apple GPU via: {mlx_model_repo}")
         
         try:
-            # MLX heavily optimizes memory and runs pure GPU natively. 
+            # MLX heavily optimizes memory and runs pure GPU natively.
             # Passing the audio file entirely works extremely well under this unified memory model.
+
+            # Parameters to reduce hallucination:
+            # - temperature=0: More deterministic, less creative/hallucinatory
+            # - compression_ratio_threshold=2.4: Reject segments with high compression ratio (likely repetitive)
+            # - logprob_threshold=-1.0: Reject segments with low confidence
+            # - no_speech_threshold=0.6: Better detection of silence/music
+            # - condition_on_previous_text=False: CRITICAL - Don't condition on previous text to avoid repetition loops
+            # - hallucination_silence_threshold=0.5: Detect and skip hallucinated segments during silence
             result = mlx_whisper.transcribe(
                 audio_path,
                 path_or_hf_repo=mlx_model_repo,
                 word_timestamps=self.whisper_word_timestamps,
                 language=language,
+                temperature=0.0,  # Deterministic mode to reduce hallucination
+                compression_ratio_threshold=2.4,  # Reject highly repetitive segments
+                logprob_threshold=-1.0,  # Reject low-confidence segments
+                no_speech_threshold=0.6,  # Better silence detection
+                condition_on_previous_text=False,  # CRITICAL: Prevent repetition loops
+                hallucination_silence_threshold=0.5,  # Skip hallucinations during silence (0-1, lower = more aggressive)
             )
             
             segments = []
@@ -419,6 +658,10 @@ class Analyzer:
                 })
                 
             logging.info(f"[mlx-whisper] Complete. Mapped {len(segments)} segments rapidly via Apple GPU.")
+
+            # Post-process: remove repetitive hallucinations
+            segments = self._remove_repetitive_segments(segments)
+
             return segments
             
         except Exception as e:
@@ -2072,7 +2315,7 @@ Additional opinion guidance:
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0.1,
-            "max_tokens": 8192,  # Siliconflow API limit
+            "max_tokens": int(0.95 * 8192),  # DeepSeek-V3 max output is 8K, use 90%
         }
 
         response = None

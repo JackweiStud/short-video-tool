@@ -392,6 +392,8 @@ class Translator:
             self._openai_client = _openai.OpenAI(
                 api_key=self.api_key,
                 base_url=self.base_url or SILICONFLOW_BASE_URL,
+                timeout=30.0,  # 30 second timeout per request
+                max_retries=2,  # Retry failed requests twice
             )
             # Default model if not set
             if self.model == self.config.openai_model:
@@ -731,8 +733,8 @@ Keep the same numbering format. Only output the translated texts, no explanation
             total_chunks = len(chunks)
 
             # Determine concurrency based on CPU count and API limits
-            # Conservative: use 6 workers (balanced performance/stability)
-            max_workers = min(6, os.cpu_count() or 4)
+            # Reduced to 3 workers for better API stability (avoid rate limits/timeouts)
+            max_workers = min(3, os.cpu_count() or 2)
 
             logging.info(
                 f"[Siliconflow] Processing {total_chunks} chunks with {max_workers} concurrent workers"
@@ -821,10 +823,13 @@ Keep the same numbering format. Only output the translated texts, no explanation
         )
 
         # Token budget per chunk
-        # Siliconflow API limit: max_tokens <= 8192
+        # Siliconflow API actual limit appears to be lower than 8192
+        # Use conservative estimate to avoid 400 errors
         avg_chars = sum(len(t) for t in texts) / max(n, 1)
         estimated_output_tokens = int(n * max(avg_chars * 2.5, 30)) + 300
-        max_tokens = max(1024, min(estimated_output_tokens * 1.2, 8192))
+        # Add 20% safety margin to avoid truncation, but cap at 4096
+        max_tokens = max(1024, min(int(estimated_output_tokens * 1.2), 4096))
+        logging.debug(f"[Siliconflow] Chunk size={n}, avg_chars={avg_chars:.1f}, estimated_tokens={estimated_output_tokens}, max_tokens={max_tokens}")
 
         def _parse_numbered(raw: str, n: int):
             """Extract only numbered lines '1. ...' from LLM response."""

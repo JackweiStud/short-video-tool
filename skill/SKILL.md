@@ -28,8 +28,11 @@ cd /Users/jackwl/Code/gitcode/short-video-tool
 # Process local video with subtitle burning
 ./venv/bin/python main.py --local-file video.mp4 --burn-subtitles
 
-# Full video (no clipping)
+# Full video use url(no clipping)
 ./venv/bin/python main.py --url "URL" --no-clip --burn-subtitles
+
+# Full video use file(no clipping)
+./venv/bin/python main.py --local-file video.mp4 --no-clip --burn-subtitles
 
 # Burn-only mode (skip ASR, use existing subtitles)
 ./venv/bin/python main.py --burn-only --video video.mp4
