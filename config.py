@@ -296,7 +296,7 @@ class Config:
     """中文字幕字体名称 (FFmpeg)"""
 
     font_size_en_vertical: int = field(
-        default_factory=lambda: int(os.getenv("FONT_SIZE_EN_VERTICAL", "36"))
+        default_factory=lambda: int(os.getenv("FONT_SIZE_EN_VERTICAL", "40"))
     )
     """垂直视频 (9:16) 英文字幕字体大小"""
 
@@ -306,7 +306,7 @@ class Config:
     """垂直视频 (9:16) 中文字幕字体大小"""
 
     font_size_en_horizontal: int = field(
-        default_factory=lambda: int(os.getenv("FONT_SIZE_EN_HORIZONTAL", "52"))
+        default_factory=lambda: int(os.getenv("FONT_SIZE_EN_HORIZONTAL", "56"))
     )
     """水平视频 (16:9) 英文字幕字体大小"""
 

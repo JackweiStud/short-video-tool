@@ -2071,8 +2071,8 @@ Additional opinion guidance:
                 },
                 {"role": "user", "content": prompt},
             ],
-            "temperature": 0.3,
-            "max_tokens": int(0.9 * 8192),  # DeepSeek-V3 max output is 8K, use 90%
+            "temperature": 0.1,
+            "max_tokens": 8192,  # Siliconflow API limit
         }
 
         response = None

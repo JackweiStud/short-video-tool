@@ -820,10 +820,11 @@ Keep the same numbering format. Only output the translated texts, no explanation
             f"只返回 JSON array，不要返回其他内容：\n\n{numbered}"
         )
 
-        # Token budget per chunk (20 segments × ~30 chars avg × 2.5 safety)
+        # Token budget per chunk
+        # Siliconflow API limit: max_tokens <= 8192
         avg_chars = sum(len(t) for t in texts) / max(n, 1)
         estimated_output_tokens = int(n * max(avg_chars * 2.5, 30)) + 300
-        max_tokens = max(512, min(estimated_output_tokens, 4096))
+        max_tokens = max(1024, min(estimated_output_tokens * 1.2, 8192))
 
         def _parse_numbered(raw: str, n: int):
             """Extract only numbered lines '1. ...' from LLM response."""

@@ -16,6 +16,45 @@ class Downloader:
         self.download_retries = self.config.download_retries
         os.makedirs(self.output_dir, exist_ok=True)
 
+    @staticmethod
+    def sanitize_filename(filename: str, max_length: int = 80) -> str:
+        """
+        Clean and shorten filename for better file management.
+
+        Args:
+            filename: Original filename
+            max_length: Maximum filename length (default: 80)
+
+        Returns:
+            Sanitized filename
+        """
+        # Remove file extension if present
+        name, ext = os.path.splitext(filename)
+
+        # Replace multiple spaces with single space
+        name = re.sub(r'\s+', ' ', name)
+
+        # Remove special characters except dash, underscore, space
+        name = re.sub(r'[^\w\s-]', '', name)
+
+        # Replace dashes with underscores
+        name = name.replace('-', '_')
+
+        # Replace spaces with underscores
+        name = name.replace(' ', '_')
+
+        # Merge consecutive underscores into single underscore
+        name = re.sub(r'_+', '_', name)
+
+        # Remove leading/trailing underscores
+        name = name.strip('_')
+
+        # Truncate if too long
+        if len(name) > max_length:
+            name = name[:max_length].rstrip('_')
+
+        return name + ext
+
     def download_video(self, url: str, quality: str = "best") -> dict:
         """
         Downloads a video from the given URL using yt-dlp.
@@ -57,6 +96,9 @@ class Downloader:
             'retries': self.download_retries,
             'fragment_retries': self.download_retries,
             'abort_on_error': False,
+            'postprocessor_args': {
+                'ffmpeg': ['-loglevel', 'error']
+            },
             'noplaylist': True, # Ensure only single video is downloaded
             'quiet': True,      # Suppress most console output
             'no_warnings': True, # Suppress warnings
@@ -95,7 +137,20 @@ class Downloader:
                     return None
 
                 filepath = ydl.prepare_filename(info_dict)
-                
+
+                # Sanitize filename
+                original_filepath = filepath
+                dir_name = os.path.dirname(filepath)
+                file_name = os.path.basename(filepath)
+                sanitized_name = self.sanitize_filename(file_name)
+                sanitized_filepath = os.path.join(dir_name, sanitized_name)
+
+                # Rename file if needed
+                if original_filepath != sanitized_filepath and os.path.exists(original_filepath):
+                    os.rename(original_filepath, sanitized_filepath)
+                    filepath = sanitized_filepath
+                    logging.info(f"Renamed file to: {sanitized_name}")
+
                 # Extract and log metadata
                 metadata = {
                     "filepath": filepath,
