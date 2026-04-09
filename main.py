@@ -382,8 +382,9 @@ def _run_summary_only_fast(args, config, video_path: str) -> int:
     if not audio_path or not os.path.exists(audio_path):
         logging.error("Failed to extract audio for summary-only-fast")
         return 1
+    audio_path = os.path.abspath(audio_path)
 
-    runner_output_dir = os.path.join(args.output, "_cohere_runner")
+    runner_output_dir = os.path.abspath(os.path.join(args.output, "_cohere_runner"))
     os.makedirs(runner_output_dir, exist_ok=True)
 
     command = [
@@ -411,27 +412,46 @@ def _run_summary_only_fast(args, config, video_path: str) -> int:
 
     if result.stdout:
         logging.info("Cohere runner stdout:\n%s", result.stdout.strip())
-    if result.stderr:
-        logging.warning("Cohere runner stderr:\n%s", result.stderr.strip())
 
     if result.returncode != 0:
+        if result.stderr:
+            stderr_lines = [
+                line
+                for line in result.stderr.splitlines()
+                if line.strip() and not line.startswith("Loading weights:")
+            ]
+            stderr_excerpt = "\n".join(stderr_lines[-20:]).strip()
+            if stderr_excerpt:
+                logging.error("Cohere runner stderr (filtered):\n%s", stderr_excerpt)
         logging.error("Cohere runner failed with exit code %s", result.returncode)
         return 1
 
-    generated_summary_path = os.path.join(runner_output_dir, "transcript_summary.md")
-    if not os.path.exists(generated_summary_path):
-        logging.error("Cohere runner did not produce summary: %s", generated_summary_path)
+    candidate_summary_paths = [
+        os.path.join(runner_output_dir, "transcript_summary.md"),
+        os.path.join(runner_output_dir, "transcript_analysis.md"),
+    ]
+    generated_summary_path = next(
+        (path for path in candidate_summary_paths if os.path.exists(path)),
+        None,
+    )
+    if not generated_summary_path:
+        logging.error(
+            "Cohere runner did not produce summary. Checked: %s",
+            ", ".join(candidate_summary_paths),
+        )
         return 1
 
     generated_transcript_path = os.path.join(runner_output_dir, "transcript.txt")
     if os.path.exists(generated_transcript_path):
         transcript_output_path = os.path.join(config.analysis_dir, "cohere_transcript.txt")
-        # Format the transcript by adding line breaks after sentence endings to improve readability
+        # Add line breaks after sentence endings to improve readability for both
+        # the raw runner output and the copied transcript in analysis/.
         try:
             with open(generated_transcript_path, "r", encoding="utf-8") as f:
                 content = f.read()
-            # Basic sentence-based line breaking
             formatted = content.replace(". ", ".\n").replace("? ", "?\n").replace("! ", "!\n")
+            with open(generated_transcript_path, "w", encoding="utf-8") as f:
+                f.write(formatted)
             with open(transcript_output_path, "w", encoding="utf-8") as f:
                 f.write(formatted)
             logging.info("Summary-only-fast transcript (formatted) saved to: %s", transcript_output_path)
