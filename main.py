@@ -9,7 +9,7 @@ Short Video Tool - 短视频一键处理工具
 用法:
     python main.py --url <视频URL>                      # 基础：下载并处理
     python main.py --local-file <本地视频路径>           # 跳过下载，直接处理本地文件
-    python main.py --summary-only --url <视频URL>       # 仅 ASR + LLM 总结，输出到 summary/<视频名>_video_summary.md
+    python main.py --summary-only-fast --url <视频URL>  # 仅抽音频 + 调用外部 Cohere 运行器生成总结
     python main.py --summary --url <视频URL>            # 正常流程结束后额外生成视频总结
 
 视频源参数（二选一，必须提供其中之一）:
@@ -73,8 +73,9 @@ Short Video Tool - 短视频一键处理工具
     # 快速烧录：显式指定字幕文件
     python main.py --burn-only --video video.mp4 --en-subtitle video_en.srt --zh-subtitle video_zh.srt --output Out-0403
 
-    # 仅生成视频总结
-    python main.py --summary-only --url "https://youtube.com/watch?v=VIDEO_ID" --output ./result
+    # 仅生成快速视频总结（Cohere 外部运行器）
+    python main.py --summary-only-fast --url "https://youtube.com/watch?v=VIDEO_ID" --output ./result
+    python main.py --summary-only-fast --local-file ./my_video.mp4 --output ./result
 
     # 运行完整流程并额外生成视频总结
     python main.py --summary --local-file ./my_video.mp4 --output ./result
@@ -85,8 +86,10 @@ import atexit
 import logging
 import json
 import os
+import shlex
 import shutil
 import signal
+import subprocess
 import sys
 from datetime import datetime
 
@@ -357,6 +360,92 @@ def _run_burn_only(args, config) -> int:
         return 1
 
 
+def _run_summary_only_fast(args, config, video_path: str) -> int:
+    """
+    Minimal fast-summary bridge:
+    1. Extract WAV audio via the main project's Analyzer
+    2. Invoke /Users/jackwl/Code/Cohere-ASR/scripts/autoFull.sh
+    3. Copy the generated transcript and Markdown summary back into this project
+    """
+    cohere_root = "/Users/jackwl/Code/Cohere-ASR"
+    auto_full_script = os.path.join(cohere_root, "scripts", "autoFull.sh")
+
+    if not os.path.exists(auto_full_script):
+        logging.error("Cohere runner not found: %s", auto_full_script)
+        return 1
+
+    os.makedirs(config.analysis_dir, exist_ok=True)
+    os.makedirs(os.path.join(args.output, "summary"), exist_ok=True)
+
+    analyzer = Analyzer(config=config)
+    audio_path = analyzer._extract_audio(video_path, config.analysis_dir)
+    if not audio_path or not os.path.exists(audio_path):
+        logging.error("Failed to extract audio for summary-only-fast")
+        return 1
+
+    runner_output_dir = os.path.join(args.output, "_cohere_runner")
+    os.makedirs(runner_output_dir, exist_ok=True)
+
+    command = [
+        "/bin/zsh",
+        auto_full_script,
+        "--input",
+        audio_path,
+        "--output",
+        runner_output_dir,
+        "--language",
+        args.language,
+    ]
+
+    logging.info("Invoking external Cohere runner: %s", auto_full_script)
+    logging.info(
+        "Cohere runner command: %s",
+        " ".join(shlex.quote(part) for part in command),
+    )
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        cwd=cohere_root,
+    )
+
+    if result.stdout:
+        logging.info("Cohere runner stdout:\n%s", result.stdout.strip())
+    if result.stderr:
+        logging.warning("Cohere runner stderr:\n%s", result.stderr.strip())
+
+    if result.returncode != 0:
+        logging.error("Cohere runner failed with exit code %s", result.returncode)
+        return 1
+
+    generated_summary_path = os.path.join(runner_output_dir, "transcript_summary.md")
+    if not os.path.exists(generated_summary_path):
+        logging.error("Cohere runner did not produce summary: %s", generated_summary_path)
+        return 1
+
+    generated_transcript_path = os.path.join(runner_output_dir, "transcript.txt")
+    if os.path.exists(generated_transcript_path):
+        transcript_output_path = os.path.join(config.analysis_dir, "cohere_transcript.txt")
+        shutil.copy2(generated_transcript_path, transcript_output_path)
+        logging.info("Summary-only-fast transcript saved to: %s", transcript_output_path)
+    else:
+        logging.warning(
+            "Cohere runner transcript not found: %s",
+            generated_transcript_path,
+        )
+
+    summary_output_dir = os.path.join(args.output, "summary")
+    os.makedirs(summary_output_dir, exist_ok=True)
+    summary_path = os.path.join(
+        summary_output_dir,
+        analyzer._build_video_summary_filename(video_path),
+    )
+    shutil.copy2(generated_summary_path, summary_path)
+
+    logging.info("Summary-only-fast saved to: %s", summary_path)
+    return 0
+
+
 def main():
     # ── Single-instance guard (must run before anything else) ──
     _acquire_lock()
@@ -406,6 +495,9 @@ def main():
   # 仅生成视频总结
   python main.py --summary-only --url "https://youtube.com/watch?v=VIDEO_ID" --output ./result
 
+  # 仅生成快速视频总结（Cohere 外部运行器）
+  python main.py --summary-only-fast --url "https://youtube.com/watch?v=VIDEO_ID" --output ./result
+
   # 运行完整流程并额外生成视频总结
   python main.py --summary --local-file ./my_video.mp4 --output ./result
         """,
@@ -441,6 +533,11 @@ def main():
         "--summary-only",
         action="store_true",
         help="仅执行 ASR + LLM 视频总结，不运行切片、翻译、整合、烧录",
+    )
+    summary_group.add_argument(
+        "--summary-only-fast",
+        action="store_true",
+        help="仅抽音频并调用外部 Cohere 运行器生成快速总结，不运行完整主流程",
     )
 
     # ── 切片控制 ──
@@ -567,7 +664,7 @@ def main():
     try:
         # Step 1: Download video (or use local file)
         logging.info("\n" + "=" * 70)
-        if args.summary_only:
+        if args.summary_only or args.summary_only_fast:
             logging.info("Step 1/2: Loading input video...")
         else:
             logging.info("Step 1/5: Downloading video...")
@@ -576,6 +673,26 @@ def main():
         video_path = _resolve_input_video(args, config)
         if not video_path:
             return 1
+
+        if args.summary_only_fast:
+            logging.info("\n" + "=" * 70)
+            logging.info("Step 2/2: Generating fast video summary...")
+            logging.info("=" * 70)
+
+            status = _run_summary_only_fast(args, config, video_path)
+            if status != 0:
+                return status
+
+            end_time = datetime.now()
+            total_time = (end_time - start_time).total_seconds()
+            logging.info("=" * 70)
+            logging.info("Summary-only-fast Complete!")
+            logging.info("=" * 70)
+            logging.info(f"Total time: {total_time:.2f} seconds")
+            logging.info(f"Output directory: {args.output}/")
+            logging.info(f"Summary directory: {os.path.join(args.output, 'summary')}")
+            logging.info(f"Log file: {config.log_file}")
+            return 0
 
         if args.summary_only:
             analyzer = Analyzer(config=config)

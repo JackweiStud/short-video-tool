@@ -1,6 +1,6 @@
 ---
 name: short-video-tool
-description: Processes videos from YouTube/X/Twitter with ASR, translation, bilingual subtitle burning, and video summaries. Use when the user mentions video processing, subtitle generation, video translation, downloading from YouTube/X/Twitter, or summary-only video understanding.
+description: Processes videos from YouTube/X/Twitter with ASR, translation, bilingual subtitle burning, and fast video summaries. Use when the user mentions video processing, subtitle generation, video translation, downloading from YouTube/X/Twitter, or quick summary-only video understanding.
 ---
 
 # Short Video Tool
@@ -15,7 +15,7 @@ Automated video processing: download → ASR → translation → bilingual subti
 - Reuse chunk-level ASR cache for long videos
 - Generate clips, subtitles, and integrated outputs
 - Hard-burn or soft-embed bilingual subtitles
-- Generate video summaries with `--summary` or `--summary-only`
+- Generate fast video summaries with `--summary-only-fast`
 
 ## When Using This Skill
 
@@ -25,7 +25,7 @@ Automated video processing: download → ASR → translation → bilingual subti
    - burn-only
 2. Prefer the existing CLI in `main.py` over custom scripts
 3. Keep output paths explicit when the user cares about generated files
-4. Mention summary output under `output/summary/` when discussing `--summary` or `--summary-only`
+4. Mention fast summary output under `output/summary/` when discussing `--summary-only-fast`
 
 
 ## Quick Start
@@ -51,9 +51,9 @@ cd /Users/jackwl/Code/gitcode/short-video-tool
 # Burn-only mode (skip ASR, use existing subtitles)
 ./venv/bin/python main.py --burn-only --video video.mp4
 
-# summary only
-./venv/bin/python main.py --summary-only --local-file video.mp4
-./venv/bin/python main.py --summary-only --url "https://x.com/i/status/STATUS_ID"
+# fast summary only
+./venv/bin/python main.py --summary-only-fast --local-file video.mp4
+./venv/bin/python main.py --summary-only-fast --url "https://x.com/i/status/STATUS_ID"
 
 # summary after full pipeline
 ./venv/bin/python main.py --url "https://x.com/i/status/STATUS_ID" --summary
@@ -98,9 +98,8 @@ cd /Users/jackwl/Code/gitcode/short-video-tool
 - `--en-subtitle <path>`: English subtitle file (optional, auto-detects `<name>_en.srt`)
 - `--zh-subtitle <path>`: Chinese subtitle file (optional, auto-detects `<name>_zh.srt`)
 
-**Summary**
-- `--summary`: generate summary after the full pipeline
-- `--summary-only`: run only `ASR + LLM summary`
+**Fast summary**
+- `--summary-only-fast`: run only `audio extraction + external Cohere ASR runner + LLM summary`
 
 ## Performance
 
@@ -146,6 +145,18 @@ cd /Users/jackwl/Code/gitcode/short-video-tool
 ```bash
 cd /Users/jackwl/Code/gitcode/short-video-tool
 ./venv/bin/python main.py --url "X_URL" --burn-subtitles
+```
+
+**URL fast summary**:
+```bash
+cd /Users/jackwl/Code/gitcode/short-video-tool
+./venv/bin/python main.py --summary-only-fast --url "X_OR_YOUTUBE_URL" --output ./result
+```
+
+**Local file fast summary**:
+```bash
+cd /Users/jackwl/Code/gitcode/short-video-tool
+./venv/bin/python main.py --summary-only-fast --local-file video.mp4 --output ./result
 ```
 
 **Batch local videos**:
