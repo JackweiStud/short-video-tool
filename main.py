@@ -426,8 +426,18 @@ def _run_summary_only_fast(args, config, video_path: str) -> int:
     generated_transcript_path = os.path.join(runner_output_dir, "transcript.txt")
     if os.path.exists(generated_transcript_path):
         transcript_output_path = os.path.join(config.analysis_dir, "cohere_transcript.txt")
-        shutil.copy2(generated_transcript_path, transcript_output_path)
-        logging.info("Summary-only-fast transcript saved to: %s", transcript_output_path)
+        # Format the transcript by adding line breaks after sentence endings to improve readability
+        try:
+            with open(generated_transcript_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            # Basic sentence-based line breaking
+            formatted = content.replace(". ", ".\n").replace("? ", "?\n").replace("! ", "!\n")
+            with open(transcript_output_path, "w", encoding="utf-8") as f:
+                f.write(formatted)
+            logging.info("Summary-only-fast transcript (formatted) saved to: %s", transcript_output_path)
+        except Exception as e:
+            logging.warning("Failed to format transcript, performing direct copy: %s", e)
+            shutil.copy2(generated_transcript_path, transcript_output_path)
     else:
         logging.warning(
             "Cohere runner transcript not found: %s",
