@@ -158,6 +158,19 @@ class Config:
     )
     """是否开启词级时间戳(用于 D+B 精准字幕对齐, 推荐开启)"""
 
+    asr_initial_prompt_enabled: bool = field(
+        default_factory=lambda: os.getenv("ASR_INITIAL_PROMPT_ENABLED", "false").lower() == "true"
+    )
+    """是否为中文 ASR 启用 initial_prompt（默认关闭）"""
+
+    asr_initial_prompt_text: str = field(
+        default_factory=lambda: os.getenv(
+            "ASR_INITIAL_PROMPT_TEXT",
+            "以下是普通话的对话，使用简体中文和正确的标点符号：，。！？“”——",
+        )
+    )
+    """中文 ASR 的 initial_prompt 文案"""
+
     # ==================== ASR 分段配置 ====================
 
     asr_chunk_duration: int = field(

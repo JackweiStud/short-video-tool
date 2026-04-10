@@ -9,6 +9,7 @@ import pytest
 import tempfile
 from unittest.mock import patch
 from pathlib import Path
+import analyzer as analyzer_module
 from analyzer import Analyzer
 
 
@@ -151,6 +152,117 @@ class TestAnalyzerFunctionality:
         assert len(merged) == 2
         assert merged[0]["text"] == "you need to think through all these things, not just the product."
         assert merged[1]["text"] == "If it were."
+
+    def test_resolve_asr_initial_prompt_only_for_zh(self):
+        analyzer = Analyzer()
+        analyzer.config.asr_initial_prompt_enabled = True
+        analyzer.config.asr_initial_prompt_text = "中文 prompt"
+
+        assert analyzer._resolve_asr_initial_prompt("zh") == "中文 prompt"
+        assert analyzer._resolve_asr_initial_prompt("zh-CN") == "中文 prompt"
+        assert analyzer._resolve_asr_initial_prompt("en") is None
+
+    def test_mlx_whisper_passes_initial_prompt(self, temp_dir, monkeypatch):
+        analyzer = Analyzer()
+        analyzer.config.asr_initial_prompt_enabled = True
+        analyzer.config.asr_initial_prompt_text = "中文 prompt"
+        analyzer.config.mlx_whisper_local_model_dir = ""
+        analyzer.asr_cache_dir = Path(temp_dir) / "cache"
+        analyzer.asr_cache_dir.mkdir(parents=True, exist_ok=True)
+
+        captured = {}
+
+        def fake_run(cmd, stdout=None, stderr=None, timeout=None):
+            if cmd and cmd[0] == analyzer.ffmpeg_bin:
+                with open(cmd[-1], "wb") as f:
+                    f.write(b"fake-wav")
+                return analyzer_module.subprocess.CompletedProcess(cmd, 0, b"", b"")
+            return analyzer_module.subprocess.CompletedProcess(cmd, 0, b"", b"")
+
+        class FakeMLXWhisper:
+            @staticmethod
+            def transcribe(*args, **kwargs):
+                captured["kwargs"] = kwargs
+                return {
+                    "segments": [
+                        {
+                            "start": 0.0,
+                            "end": 1.0,
+                            "text": "测试",
+                            "words": [],
+                        }
+                    ]
+                }
+
+        monkeypatch.setattr(analyzer_module.subprocess, "run", fake_run)
+        monkeypatch.setitem(sys.modules, "mlx_whisper", FakeMLXWhisper)
+        monkeypatch.setattr(analyzer, "_get_audio_duration", lambda _: 1.0)
+        monkeypatch.setattr(analyzer, "_build_asr_chunk_windows", lambda duration: [(0, 0.0, 1.0)])
+        monkeypatch.setattr(
+            analyzer,
+            "_build_asr_chunk_cache_file",
+            lambda cache_key_prefix, chunk_idx: analyzer.asr_cache_dir / f"{cache_key_prefix}_{chunk_idx}.json",
+        )
+
+        result = analyzer._run_asr_mlx_whisper(
+            "/tmp/input.wav",
+            model="medium",
+            language="zh",
+            cache_source_path="/tmp/input.wav",
+        )
+
+        assert result
+        assert captured["kwargs"]["initial_prompt"] == "中文 prompt"
+        assert captured["kwargs"]["language"] == "zh"
+
+    def test_whisper_cli_command_includes_initial_prompt(self, temp_dir, monkeypatch):
+        analyzer = Analyzer()
+        analyzer.config.asr_initial_prompt_enabled = True
+        analyzer.config.asr_initial_prompt_text = "中文 prompt"
+
+        commands = []
+
+        class FakePopen:
+            def __init__(self, cmd, stdout=None, stderr=None, start_new_session=None):
+                commands.append(cmd)
+                self.cmd = cmd
+                self.stdout = stdout
+                self.stderr = stderr
+                self.start_new_session = start_new_session
+                self.returncode = 0
+                self.pid = 12345
+
+            def communicate(self):
+                return b"", b""
+
+        monkeypatch.setattr(analyzer_module.subprocess, "Popen", FakePopen)
+        monkeypatch.setattr(analyzer_module.os, "getpgid", lambda pid: pid)
+        monkeypatch.setattr(analyzer_module.os, "killpg", lambda pgid, sig: None)
+        monkeypatch.setattr(analyzer_module.os.path, "exists", lambda path: False)
+        monkeypatch.setattr(analyzer, "_require_whisper_cli", lambda: "/usr/bin/whisper")
+
+        result = analyzer._run_transcription_process_with_timeout(
+            target_func=Analyzer._transcribe_chunk_whisper_cli,
+            args=(
+                os.path.join(temp_dir, "chunk_000.wav"),
+                "medium",
+                "zh",
+                "/usr/bin/whisper",
+                1,
+                1,
+                True,
+                "中文 prompt",
+                temp_dir,
+            ),
+            timeout=5,
+            chunk_display_idx=1,
+            total_chunks=1,
+        )
+
+        assert result == []
+        assert commands
+        assert "--initial_prompt" in commands[0]
+        assert "中文 prompt" in commands[0]
 
     def test_summary_only_analysis_skips_other_steps(self, temp_dir):
         analyzer = Analyzer()

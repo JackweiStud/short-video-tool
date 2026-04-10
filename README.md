@@ -133,6 +133,7 @@ Summary files are written to:
 
 - `--language <code>`: ASR language, default `en`
 - `--quality <value>`: download quality such as `best`, `1080p`, `720p`
+- Chinese ASR can optionally use `initial_prompt` for punctuation/style guidance when `ASR_INITIAL_PROMPT_ENABLED=true`
 
 ### Burn-only
 
@@ -161,6 +162,8 @@ Common variables:
 - `TRANSLATION_BACKEND`
 - `WHISPER_MODEL`
 - `WHISPER_WORD_TIMESTAMPS`
+- `ASR_INITIAL_PROMPT_ENABLED`
+- `ASR_INITIAL_PROMPT_TEXT`
 - `ASR_LANGUAGE`
 - `FASTER_WHISPER_LOCAL_MODEL_DIR`
 - `MLX_WHISPER_LOCAL_MODEL_DIR`

@@ -151,6 +151,18 @@ class Analyzer:
         """Return the cache file path for a specific ASR chunk."""
         return self.asr_cache_dir / f"{cache_key_prefix}_chunk{chunk_idx:03d}.json"
 
+    def _resolve_asr_initial_prompt(self, language: str) -> Optional[str]:
+        """Return a configured initial prompt for Chinese ASR, or None."""
+        enabled = getattr(self.config, "asr_initial_prompt_enabled", False)
+        if not enabled:
+            return None
+
+        if not (language or "").lower().startswith("zh"):
+            return None
+
+        prompt = getattr(self.config, "asr_initial_prompt_text", "").strip()
+        return prompt or None
+
     def _read_asr_chunk_cache(
         self,
         engine_name: str,
@@ -953,6 +965,8 @@ class Analyzer:
         import shutil
         import os
 
+        initial_prompt = self._resolve_asr_initial_prompt(language)
+
         duration = self._get_audio_duration(audio_path)
         logging.info(
             f"[mlx-whisper] Audio duration: {duration:.1f}s ({duration / 60:.1f} min)"
@@ -1050,7 +1064,8 @@ class Analyzer:
 
                         logging.info(
                             f"[mlx-whisper] {chunk_label}: starting transcription "
-                            f"(timeout={self.asr_segment_timeout}s, word_timestamps={self.whisper_word_timestamps})"
+                            f"(timeout={self.asr_segment_timeout}s, word_timestamps={self.whisper_word_timestamps}, "
+                            f"initial_prompt={'on' if initial_prompt else 'off'})"
                         )
 
                         result_container = []
@@ -1064,6 +1079,7 @@ class Analyzer:
                                         path_or_hf_repo=mlx_model_repo,
                                         word_timestamps=self.whisper_word_timestamps,
                                         language=language,
+                                        initial_prompt=initial_prompt,
                                         temperature=0.0,
                                         compression_ratio_threshold=2.4,
                                         logprob_threshold=-1.0,
@@ -1209,6 +1225,7 @@ class Analyzer:
         """
         import tempfile
         import shutil
+        initial_prompt = self._resolve_asr_initial_prompt(language)
 
         duration = self._get_audio_duration(audio_path)
         logging.info(
@@ -1329,6 +1346,7 @@ class Analyzer:
                                 language=language,
                                 word_timestamps=self.whisper_word_timestamps,
                                 vad_filter=self.asr_vad_filter,
+                                initial_prompt=initial_prompt,
                             )
                             result_container.append(list(segs))
                         except Exception as e:
@@ -1336,7 +1354,8 @@ class Analyzer:
 
                     logging.info(
                         f"[faster-whisper] {chunk_label}: starting transcription "
-                        f"(timeout={self.asr_segment_timeout}s, vad_filter={self.asr_vad_filter}, isolated_process=False)"
+                        f"(timeout={self.asr_segment_timeout}s, vad_filter={self.asr_vad_filter}, "
+                        f"initial_prompt={'on' if initial_prompt else 'off'}, isolated_process=False)"
                     )
                     t = threading.Thread(target=_transcribe, daemon=True)
                     t.start()
@@ -1602,6 +1621,7 @@ class Analyzer:
         chunk_idx: int,
         total: int,
         whisper_word_timestamps: bool,
+        initial_prompt: Optional[str],
         tmp_dir: str,
         result_queue: Queue,
     ) -> None:
@@ -1634,6 +1654,8 @@ class Analyzer:
         ]
         if whisper_word_timestamps:
             whisper_cmd += ["--word_timestamps", "True"]
+        if initial_prompt:
+            whisper_cmd += ["--initial_prompt", initial_prompt]
         # chunk_json: whisper writes {stem}.json into output_dir
         chunk_stem = os.path.splitext(os.path.basename(chunk_wav))[0]
         chunk_json = os.path.join(tmp_dir, chunk_stem + ".json")
@@ -1669,7 +1691,7 @@ class Analyzer:
     def _run_transcription_process_with_timeout(
         self,
         target_func,  # kept for API compatibility but not used
-        args: tuple,  # (chunk_wav, model, language, idx, total, whisper_word_timestamps, tmp_dir)
+        args: tuple,  # (chunk_wav, model, language, whisper_bin, idx, total, whisper_word_timestamps, initial_prompt, tmp_dir)
         timeout: int,
         chunk_display_idx: int,
         total_chunks: int,
@@ -1681,8 +1703,8 @@ class Analyzer:
         """
         import os, signal, threading, subprocess, json
 
-        # Unpack args: (chunk_wav, model, language, whisper_bin, idx, total, whisper_word_timestamps, tmp_dir)
-        chunk_wav, model, language, whisper_bin, idx, total, whisper_word_timestamps, tmp_dir = args
+        # Unpack args: (chunk_wav, model, language, whisper_bin, idx, total, whisper_word_timestamps, initial_prompt, tmp_dir)
+        chunk_wav, model, language, whisper_bin, idx, total, whisper_word_timestamps, initial_prompt, tmp_dir = args
         whisper_bin = whisper_bin or self._require_whisper_cli()
         if not whisper_bin:
             return None
@@ -1701,6 +1723,8 @@ class Analyzer:
         ]
         if whisper_word_timestamps:
             whisper_cmd += ["--word_timestamps", "True"]
+        if initial_prompt:
+            whisper_cmd += ["--initial_prompt", initial_prompt]
 
         chunk_stem = os.path.splitext(os.path.basename(chunk_wav))[0]
         chunk_json = os.path.join(tmp_dir, chunk_stem + ".json")
@@ -1779,6 +1803,7 @@ class Analyzer:
         whisper_bin = self._require_whisper_cli()
         if not whisper_bin:
             return []
+        initial_prompt = self._resolve_asr_initial_prompt(language)
 
         duration = self._get_audio_duration(audio_path)
         logging.info(
@@ -1854,7 +1879,8 @@ class Analyzer:
 
                     logging.info(
                         f"[whisper-cli] {chunk_label}: starting transcription "
-                        f"(timeout={self.asr_segment_timeout}s, word_timestamps={self.whisper_word_timestamps})"
+                        f"(timeout={self.asr_segment_timeout}s, word_timestamps={self.whisper_word_timestamps}, "
+                        f"initial_prompt={'on' if initial_prompt else 'off'})"
                     )
                     chunk_segments_raw = self._run_transcription_process_with_timeout(
                         target_func=Analyzer._transcribe_chunk_whisper_cli,
@@ -1866,6 +1892,7 @@ class Analyzer:
                             idx + 1,
                             total,
                             self.whisper_word_timestamps,
+                            initial_prompt,
                             tmp_dir,
                         ),
                         timeout=self.asr_segment_timeout,

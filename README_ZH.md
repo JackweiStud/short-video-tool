@@ -131,6 +131,7 @@ which whisper
 
 - `--language <code>`：ASR 语言，默认 `en`
 - `--quality <value>`：下载画质，例如 `best`、`1080p`、`720p`
+- 当 `ASR_INITIAL_PROMPT_ENABLED=true` 时，中文 ASR 会注入 `initial_prompt` 以辅助标点和风格
 
 ### Burn-only
 
@@ -159,6 +160,8 @@ which whisper
 - `TRANSLATION_BACKEND`
 - `WHISPER_MODEL`
 - `WHISPER_WORD_TIMESTAMPS`
+- `ASR_INITIAL_PROMPT_ENABLED`
+- `ASR_INITIAL_PROMPT_TEXT`
 - `ASR_LANGUAGE`
 - `FASTER_WHISPER_LOCAL_MODEL_DIR`
 - `MLX_WHISPER_LOCAL_MODEL_DIR`
