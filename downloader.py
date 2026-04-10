@@ -2,6 +2,7 @@
 import yt_dlp
 import os
 import logging
+import glob
 import re
 from typing import Optional
 
@@ -54,6 +55,76 @@ class Downloader:
             name = name[:max_length].rstrip('_')
 
         return name + ext
+
+    @staticmethod
+    def build_stable_download_filename(
+        title: Optional[str], video_id: Optional[str], filepath: str
+    ) -> str:
+        """
+        Build a stable filename in the form:
+        <title_prefix>_<video_id><ext>
+
+        The title prefix is capped to 15 characters before sanitization so the
+        resulting filename is short, readable, and resilient to long social post
+        titles.
+        """
+        _, ext = os.path.splitext(filepath)
+        ext = ext or ".mp4"
+
+        raw_title = (title or "video").strip()
+        title_prefix = raw_title[:15].strip() or "video"
+        sanitized_prefix = Downloader.sanitize_filename(
+            f"{title_prefix}{ext}", max_length=15
+        )
+        sanitized_prefix = os.path.splitext(sanitized_prefix)[0] or "video"
+
+        safe_video_id = re.sub(r"[^\w.-]+", "_", (video_id or "video").strip())
+        safe_video_id = safe_video_id.strip("._-") or "video"
+
+        return f"{sanitized_prefix}_{safe_video_id}{ext}"
+
+    @staticmethod
+    def _resolve_downloaded_filepath(ydl, info_dict: dict) -> Optional[str]:
+        """
+        Resolve the actual file path produced by yt-dlp.
+
+        yt-dlp may report the pre-merge filename via prepare_filename(), while the
+        final on-disk file has already been merged to another extension. We prefer
+        the real file on disk over the template path so post-download renaming is
+        reliable for X/Twitter downloads and other merged formats.
+        """
+        candidates = []
+        for key in ("filepath", "_filename"):
+            value = info_dict.get(key)
+            if value:
+                candidates.append(value)
+
+        try:
+            candidates.append(ydl.prepare_filename(info_dict))
+        except Exception:
+            pass
+
+        for candidate in candidates:
+            if candidate and os.path.exists(candidate):
+                return candidate
+
+        try:
+            prepared = ydl.prepare_filename(info_dict)
+        except Exception:
+            prepared = None
+
+        if prepared:
+            stem, _ = os.path.splitext(prepared)
+            matches = [
+                path
+                for path in glob.glob(f"{stem}.*")
+                if os.path.isfile(path) and not path.endswith(".part")
+            ]
+            if matches:
+                matches.sort(key=os.path.getmtime, reverse=True)
+                return matches[0]
+
+        return prepared
 
     def download_video(self, url: str, quality: str = "best") -> dict:
         """
@@ -136,13 +207,19 @@ class Downloader:
                     logging.error(f"Failed to extract info or download for URL: {url}")
                     return None
 
-                filepath = ydl.prepare_filename(info_dict)
+                filepath = self._resolve_downloaded_filepath(ydl, info_dict)
+                if not filepath:
+                    logging.error(f"Could not resolve downloaded file path for URL: {url}")
+                    return None
 
-                # Sanitize filename
+                # Build a stable short filename
                 original_filepath = filepath
                 dir_name = os.path.dirname(filepath)
-                file_name = os.path.basename(filepath)
-                sanitized_name = self.sanitize_filename(file_name)
+                sanitized_name = self.build_stable_download_filename(
+                    info_dict.get("title"),
+                    info_dict.get("id") or info_dict.get("display_id"),
+                    filepath,
+                )
                 sanitized_filepath = os.path.join(dir_name, sanitized_name)
 
                 # Rename file if needed

@@ -63,6 +63,48 @@ class Analyzer:
         self.llm_api_key = self.config.llm_api_key
         self.topic_segment_min_duration = self.config.topic_segment_min_duration
         self.llm_timeout = self.config.llm_timeout
+        self.ffmpeg_bin = self._resolve_tool_bin(
+            "FFMPEG_PATH",
+            "ffmpeg",
+            [
+                "/opt/homebrew/bin/ffmpeg",  # Common macOS Homebrew location
+                "/usr/local/bin/ffmpeg",     # Common Intel macOS/Linux location
+                "/usr/bin/ffmpeg",           # Common Linux location
+            ],
+        )
+        self.ffprobe_bin = self._resolve_tool_bin(
+            "FFPROBE_PATH",
+            "ffprobe",
+            [
+                "/opt/homebrew/bin/ffprobe",
+                "/usr/local/bin/ffprobe",
+                "/usr/bin/ffprobe",
+            ],
+        )
+
+    def _resolve_tool_bin(
+        self,
+        env_var: str,
+        tool_name: str,
+        fallback_paths: list[str],
+    ) -> str:
+        """Resolve a tool executable from env, PATH, or common fallback locations."""
+        candidates = [
+            os.getenv(env_var),
+            shutil.which(tool_name),
+            *fallback_paths,
+        ]
+
+        for candidate in candidates:
+            if not candidate:
+                continue
+            candidate_path = Path(candidate).expanduser()
+            if candidate_path.is_file() and os.access(candidate_path, os.X_OK):
+                logging.debug(f"Resolved {tool_name} to: {candidate_path}")
+                return str(candidate_path)
+
+        # Final fallback to the command name and hope for the best if nothing found
+        return tool_name
 
     @staticmethod
     def _format_duration_mmss(seconds: float) -> str:
@@ -553,18 +595,18 @@ class Analyzer:
         try:
             # Check if ffmpeg is available
             ffmpeg_check = subprocess.run(
-                ["ffmpeg", "-version"],
+                [self.ffmpeg_bin, "-version"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
             )
 
             if ffmpeg_check.returncode != 0:
-                logging.error("ffmpeg is not installed or not accessible")
+                logging.error(f"ffmpeg ({self.ffmpeg_bin}) is not installed or not accessible")
                 return None
 
             cmd = [
-                "ffmpeg",
+                self.ffmpeg_bin,
                 "-i",
                 video_path,
                 "-vn",  # No video
@@ -972,7 +1014,7 @@ class Analyzer:
                         )
 
                         ffmpeg_cmd = [
-                            "ffmpeg",
+                            self.ffmpeg_bin,
                             "-y",
                             "-ss",
                             str(chunk_start),
@@ -1231,7 +1273,7 @@ class Analyzer:
                     )
 
                     ffmpeg_cmd = [
-                        "ffmpeg",
+                        self.ffmpeg_bin,
                         "-y",
                         "-ss",
                         str(chunk_start),
@@ -1517,7 +1559,7 @@ class Analyzer:
         try:
             result = subprocess.run(
                 [
-                    "ffprobe",
+                    self.ffprobe_bin,
                     "-v",
                     "quiet",
                     "-print_format",
@@ -1778,7 +1820,7 @@ class Analyzer:
                     )
 
                     ffmpeg_cmd = [
-                        "ffmpeg",
+                        self.ffmpeg_bin,
                         "-y",
                         "-ss",
                         str(chunk_start),
@@ -2006,7 +2048,7 @@ class Analyzer:
         try:
             # Check if video has subtitle tracks
             probe_cmd = [
-                "ffprobe",
+                self.ffprobe_bin,
                 "-v",
                 "error",
                 "-select_streams",
@@ -2035,7 +2077,7 @@ class Analyzer:
 
             # Extract first subtitle track to SRT
             srt_path = f"/tmp/soft_subtitle_{os.path.basename(video_path)}.srt"
-            extract_cmd = ["ffmpeg", "-y", "-i", video_path, "-map", "0:s:0", srt_path]
+            extract_cmd = [self.ffmpeg_bin, "-y", "-i", video_path, "-map", "0:s:0", srt_path]
             result = subprocess.run(
                 extract_cmd, capture_output=True, text=True, timeout=30
             )
