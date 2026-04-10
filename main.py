@@ -73,9 +73,10 @@ Short Video Tool - 短视频一键处理工具
     # 快速烧录：显式指定字幕文件
     python main.py --burn-only --video video.mp4 --en-subtitle video_en.srt --zh-subtitle video_zh.srt --output Out-0403
 
-    # 仅生成快速视频总结（Cohere 外部运行器）
+    # 仅生成快速视频总结（Cohere 外部运行器；可配合 --language zh --enCleanUp 1；不要改成 --summary-only）
     python main.py --summary-only-fast --url "https://youtube.com/watch?v=VIDEO_ID" --output ./result
     python main.py --summary-only-fast --local-file ./my_video.mp4 --output ./result
+    python main.py --summary-only-fast --local-file ./my_video.mp4 --output ./result --language zh --enCleanUp 1
 
     # 运行完整流程并额外生成视频总结
     python main.py --summary --local-file ./my_video.mp4 --output ./result
@@ -364,14 +365,18 @@ def _run_summary_only_fast(args, config, video_path: str) -> int:
     """
     Minimal fast-summary bridge:
     1. Extract WAV audio via the main project's Analyzer
-    2. Invoke /Users/jackwl/Code/Cohere-ASR/scripts/autoFull.sh
+    2. Invoke /Users/jackwl/Code/Cohere-ASR/scripts/autoFull.py
     3. Copy the generated transcript and Markdown summary back into this project
     """
     cohere_root = "/Users/jackwl/Code/Cohere-ASR"
-    auto_full_script = os.path.join(cohere_root, "scripts", "autoFull.sh")
+    auto_full_script = os.path.join(cohere_root, "scripts", "autoFull.py")
+    cohere_python = os.path.join(cohere_root, ".venv", "bin", "python")
 
     if not os.path.exists(auto_full_script):
         logging.error("Cohere runner not found: %s", auto_full_script)
+        return 1
+    if not os.path.exists(cohere_python):
+        logging.error("Cohere runner Python not found: %s", cohere_python)
         return 1
 
     os.makedirs(config.analysis_dir, exist_ok=True)
@@ -388,7 +393,7 @@ def _run_summary_only_fast(args, config, video_path: str) -> int:
     os.makedirs(runner_output_dir, exist_ok=True)
 
     command = [
-        "/bin/zsh",
+        cohere_python,
         auto_full_script,
         "--input",
         audio_path,
@@ -397,6 +402,8 @@ def _run_summary_only_fast(args, config, video_path: str) -> int:
         "--language",
         args.language,
     ]
+    if args.enCleanUp == 1:
+        command.extend(["--enCleanUp", "1"])
 
     logging.info("Invoking external Cohere runner: %s", auto_full_script)
     logging.info(
@@ -428,6 +435,7 @@ def _run_summary_only_fast(args, config, video_path: str) -> int:
 
     candidate_summary_paths = [
         os.path.join(runner_output_dir, "transcript_summary.md"),
+        os.path.join(runner_output_dir, "transcript_cleaned_analysis.md"),
         os.path.join(runner_output_dir, "transcript_analysis.md"),
     ]
     generated_summary_path = next(
@@ -441,8 +449,15 @@ def _run_summary_only_fast(args, config, video_path: str) -> int:
         )
         return 1
 
-    generated_transcript_path = os.path.join(runner_output_dir, "transcript.txt")
-    if os.path.exists(generated_transcript_path):
+    generated_transcript_candidates = [
+        os.path.join(runner_output_dir, "transcript_cleaned.txt"),
+        os.path.join(runner_output_dir, "transcript.txt"),
+    ]
+    generated_transcript_path = next(
+        (path for path in generated_transcript_candidates if os.path.exists(path)),
+        None,
+    )
+    if generated_transcript_path:
         transcript_output_path = os.path.join(config.analysis_dir, "cohere_transcript.txt")
         # Add line breaks after sentence endings to improve readability for both
         # the raw runner output and the copied transcript in analysis/.
@@ -458,10 +473,11 @@ def _run_summary_only_fast(args, config, video_path: str) -> int:
         except Exception as e:
             logging.warning("Failed to format transcript, performing direct copy: %s", e)
             shutil.copy2(generated_transcript_path, transcript_output_path)
+        logging.info("Summary-only-fast transcript copied to: %s", transcript_output_path)
     else:
         logging.warning(
-            "Cohere runner transcript not found: %s",
-            generated_transcript_path,
+            "Cohere runner transcript not found. Checked: %s",
+            ", ".join(generated_transcript_candidates),
         )
 
     summary_output_dir = os.path.join(args.output, "summary")
@@ -568,6 +584,13 @@ def main():
         "--summary-only-fast",
         action="store_true",
         help="仅抽音频并调用外部 Cohere 运行器生成快速总结，不运行完整主流程",
+    )
+    parser.add_argument(
+        "--enCleanUp",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help="快速总结时是否先执行 Cohere 文本清洗（0=不清洗，1=清洗，默认: %(default)s）",
     )
 
     # ── 切片控制 ──

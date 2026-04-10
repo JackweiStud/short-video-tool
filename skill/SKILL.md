@@ -26,6 +26,9 @@ Automated video processing: download → ASR → translation → bilingual subti
 2. Prefer the existing CLI in `main.py` over custom scripts
 3. Keep output paths explicit when the user cares about generated files
 4. Mention fast summary output under `output/summary/` when discussing `--summary-only-fast`
+5. For Chinese audio, pass `--language zh`
+6. When the user asks for fast summary with cleanup, use `--summary-only-fast --enCleanUp 1`
+7. Do not replace `--summary-only-fast` with `--summary-only` just because `--enCleanUp` is present
 
 
 ## Quick Start
@@ -54,6 +57,7 @@ cd /Users/jackwl/Code/gitcode/short-video-tool
 # fast summary only
 ./venv/bin/python main.py --summary-only-fast --local-file video.mp4
 ./venv/bin/python main.py --summary-only-fast --url "https://x.com/i/status/STATUS_ID"
+./venv/bin/python main.py --summary-only-fast --local-file video.mp4 --language zh --enCleanUp 1
 
 # summary after full pipeline
 ./venv/bin/python main.py --url "https://x.com/i/status/STATUS_ID" --summary
@@ -89,7 +93,7 @@ cd /Users/jackwl/Code/gitcode/short-video-tool
   - `none` — Burn bilingual subtitles (same as burn mode)
 
 **ASR & video quality**:
-- `--language <code>`: ASR speech recognition language (default: `en`)
+- `--language <code>`: ASR speech recognition language (default: `en`; use `zh` for Chinese audio)
 - `--quality <res>`: Download resolution, e.g. `1080p` / `720p` / `best`
 
 **Burn-only mode** (skip ASR/analysis/translation, directly burn subtitles):
@@ -100,6 +104,8 @@ cd /Users/jackwl/Code/gitcode/short-video-tool
 
 **Fast summary**
 - `--summary-only-fast`: run only `audio extraction + external Cohere ASR runner + LLM summary`
+- `--enCleanUp 0|1`: optional cleanup pass for `--summary-only-fast` before summary (`0` = skip, `1` = enable)
+- `--summary-only`: different path; do not switch to it when the user explicitly asked for `--summary-only-fast`
 
 ## Performance
 
@@ -158,6 +164,18 @@ cd /Users/jackwl/Code/gitcode/short-video-tool
 cd /Users/jackwl/Code/gitcode/short-video-tool
 ./venv/bin/python main.py --summary-only-fast --local-file video.mp4 --output ./result
 ```
+
+**Chinese fast summary with cleanup**:
+```bash
+cd /Users/jackwl/Code/gitcode/short-video-tool
+./venv/bin/python main.py --summary-only-fast --local-file video.mp4 --output ./result --language zh --enCleanUp 1
+```
+
+Expected flag pairing:
+```bash
+./venv/bin/python main.py --summary-only-fast --local-file video.mp4 --language zh --enCleanUp 1 --output ./result
+```
+Do not rewrite that command to `--summary-only`.
 
 **Batch local videos**:
 ```bash
