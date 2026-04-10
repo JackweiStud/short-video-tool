@@ -52,7 +52,7 @@ class StubConfig:
 
         self.ffmpeg_timeout = 123
 
-        # ASR chunking config (added for faster-whisper / chunked CLI fallback)
+        # ASR chunking config (used by mlx-whisper and faster-whisper)
         self.asr_chunk_duration = 600
         self.asr_overlap_seconds = 5
         self.asr_segment_timeout = 600
@@ -307,23 +307,6 @@ def test_translator_uses_config_model_backend(monkeypatch, temp_dir):
     assert translator.model == cfg.openai_model
     assert translator.backend == cfg.translation_backend
     assert translator.default_output_dir == cfg.subtitles_dir
-
-
-def test_analyzer_resolves_whisper_cli_from_environment(monkeypatch, temp_dir):
-    cfg = StubConfig(temp_dir)
-
-    whisper_cli = Path(temp_dir) / "whisper"
-    whisper_cli.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    whisper_cli.chmod(0o755)
-
-    monkeypatch.setenv("WHISPER_CLI_PATH", str(whisper_cli))
-    monkeypatch.setattr(analyzer_module.shutil, "which", lambda name: None)
-
-    analyzer = Analyzer(config=cfg)
-
-    assert analyzer.whisper_cli == str(whisper_cli)
-
-
 def test_main_propagates_config_video_quality_to_downloader(monkeypatch, temp_dir):
     cfg = StubConfig(temp_dir)
     cfg.video_quality = "1080p"

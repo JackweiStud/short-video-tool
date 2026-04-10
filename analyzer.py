@@ -9,7 +9,7 @@ import math
 import re
 import shutil
 from datetime import datetime
-from multiprocessing import Queue, set_start_method
+from multiprocessing import set_start_method
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional, List, Dict
@@ -42,8 +42,6 @@ class Analyzer:
             self.asr_cache_dir = Path(__file__).resolve().parent / self.asr_cache_dir
         self.asr_vad_filter = self.config.asr_vad_filter
         self.asr_vad_min_duration = self.config.asr_vad_min_duration_threshold
-
-        self.whisper_cli = self._resolve_whisper_cli()
 
         try:
             set_start_method("fork", force=True)
@@ -252,34 +250,6 @@ class Analyzer:
                 cache_segments,
             )
         return chunk_segments
-
-    def _resolve_whisper_cli(self) -> Optional[str]:
-        """Resolve the whisper CLI executable from env, PATH, or common installs."""
-        candidates = [
-            os.getenv("WHISPER_CLI_PATH"),
-            os.getenv("WHISPER_BIN"),
-            shutil.which("whisper"),
-            "/opt/homebrew/bin/whisper",
-            "/usr/local/bin/whisper",
-        ]
-
-        for candidate in candidates:
-            if not candidate:
-                continue
-            candidate_path = Path(candidate).expanduser()
-            if candidate_path.is_file() and os.access(candidate_path, os.X_OK):
-                return str(candidate_path)
-        return None
-
-    def _require_whisper_cli(self) -> Optional[str]:
-        """Return the resolved whisper CLI or log a clear error if none exists."""
-        if self.whisper_cli:
-            return self.whisper_cli
-
-        logging.error(
-            "Whisper CLI not found. Set WHISPER_CLI_PATH or install 'whisper' on PATH."
-        )
-        return None
 
     def analyze_video(
         self,
@@ -691,10 +661,10 @@ class Analyzer:
         cache_source_path: Optional[str] = None,
     ) -> list:
         """
-        Run ASR using mlx-whisper (Apple Silicon), faster-whisper, or fallback to whisper CLI.
+        Run ASR using mlx-whisper (Apple Silicon) or faster-whisper.
         """
         import platform
-        # 1. Priority: mlx-whisper for Mac M-series (Apple Silicon GPU acceleration)
+        # 1. Priority: mlx-whisper on Mac M-series (Apple Silicon GPU acceleration)
         if platform.system() == "Darwin" and platform.machine() == "arm64":
             try:
                 import mlx_whisper  # noqa: F401
@@ -718,14 +688,12 @@ class Analyzer:
             logging.info("[ASR] faster-whisper available, using faster-whisper engine")
             return self._run_asr_faster_whisper(audio_path, model, language)
         except ImportError:
-            logging.warning(
-                "[ASR] faster-whisper not available, falling back to whisper CLI"
-            )
-            return self._run_asr_whisper_cli(audio_path, model, language)
+            logging.error("[ASR] faster-whisper not available; no ASR engine remains")
+            return []
 
     def _remove_repetitive_segments(self, segments: List[Dict], similarity_threshold: float = 0.85) -> List[Dict]:
         """
-        Remove repetitive ASR segments caused by Whisper hallucination.
+        Remove repetitive ASR segments caused by ASR hallucination.
 
         Strategy: When detecting a repetition zone, merge all repetitive segments
         into a single segment covering the entire time range. This preserves
@@ -955,9 +923,8 @@ class Analyzer:
         cache_source_path: Optional[str] = None,
     ) -> list:
         """
-        Chunked MLX Whisper ASR with segment-level cache and overlap merging.
-        Mirrors the faster-whisper / whisper-cli chunk cache flow, but uses an
-        isolated MLX cache key prefix to avoid collisions with other engines.
+        Chunked MLX-based ASR with segment-level cache and overlap merging.
+        Uses an isolated MLX cache key prefix to avoid collisions with other engines.
         """
         import mlx_whisper
         import tempfile
@@ -1001,7 +968,7 @@ class Analyzer:
                 mlx_model_repo = f"mlx-community/whisper-{model}-mlx"
                 logging.info(f"[mlx-whisper] Local model not found, using HF repo: {mlx_model_repo}")
         else:
-            # Default fallback to mlx-community repo structures for whisper:
+            # Default fallback uses the standard MLX community repo naming scheme.
             mlx_model_repo = f"mlx-community/whisper-{model}-mlx"
             logging.info(f"[mlx-whisper] Transcribing audio with Apple GPU via: {mlx_model_repo}")
 
@@ -1219,9 +1186,9 @@ class Analyzer:
         self, audio_path: str, model: str = "medium", language: str = "en"
     ) -> list:
         """
-        Chunked faster-whisper ASR with segment-level cache, timeout, and overlap merging.
+        Chunked faster-whisper-based ASR with segment-level cache, timeout, and overlap merging.
         Splits audio into chunks via ffmpeg, runs faster-whisper per chunk, merges results.
-        Cache key prefixed with 'fw_' to avoid collision with whisper-cli cache.
+        Cache key prefixed with 'fw_' to avoid collisions with other ASR engines.
         """
         import tempfile
         import shutil
@@ -1238,7 +1205,7 @@ class Analyzer:
             "fw", audio_path, model, language
         )
 
-        # Build chunks (same logic as whisper-cli)
+        # Build chunks using the same overlap policy as the other engines
         chunks = self._build_asr_chunk_windows(duration)
 
         total = len(chunks)
@@ -1611,455 +1578,6 @@ class Analyzer:
         except Exception:
             h.update(filepath.encode())
         return h.hexdigest()[:16]
-
-    @staticmethod
-    def _transcribe_chunk_whisper_cli(
-        chunk_wav: str,
-        model: str,
-        language: str,
-        whisper_bin: str,
-        chunk_idx: int,
-        total: int,
-        whisper_word_timestamps: bool,
-        initial_prompt: Optional[str],
-        tmp_dir: str,
-        result_queue: Queue,
-    ) -> None:
-        """
-        Worker function: runs in a separate Process.
-        Executes whisper CLI on a single chunk WAV, puts result list into result_queue.
-        Uses Popen + setsid so the whisper process group can be killed on timeout.
-        Puts (pgid, segments_or_None) into result_queue.
-        """
-        import subprocess, json, os, logging, signal
-
-        if not whisper_bin:
-            logging.error(
-                f"[Chunk {chunk_idx + 1}/{total}] Whisper CLI executable not configured"
-            )
-            result_queue.put((-1, []))
-            return
-
-        whisper_cmd = [
-            whisper_bin,
-            chunk_wav,
-            "--model",
-            model,
-            "--language",
-            language,
-            "--output_format",
-            "json",
-            "--output_dir",
-            tmp_dir,
-        ]
-        if whisper_word_timestamps:
-            whisper_cmd += ["--word_timestamps", "True"]
-        if initial_prompt:
-            whisper_cmd += ["--initial_prompt", initial_prompt]
-        # chunk_json: whisper writes {stem}.json into output_dir
-        chunk_stem = os.path.splitext(os.path.basename(chunk_wav))[0]
-        chunk_json = os.path.join(tmp_dir, chunk_stem + ".json")
-        try:
-            proc = subprocess.Popen(
-                whisper_cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                start_new_session=True,  # creates new process group
-            )
-            pgid = os.getpgid(proc.pid)
-            # Signal parent the pgid so it can kill on timeout
-            result_queue.put((pgid, None))
-            stdout, stderr = proc.communicate()
-            if proc.returncode == 0 and os.path.exists(chunk_json):
-                with open(chunk_json, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                segments = data.get("segments", [])
-                logging.info(
-                    f"[Chunk {chunk_idx + 1}/{total}] Got {len(segments)} segments"
-                )
-                result_queue.put((pgid, segments))
-            else:
-                logging.error(
-                    f"[Chunk {chunk_idx + 1}/{total}] whisper failed rc={proc.returncode} "
-                    f"json_exists={os.path.exists(chunk_json)} stderr={stderr.decode(errors='replace')[:200]}"
-                )
-                result_queue.put((pgid, []))
-        except Exception as e:
-            logging.error(f"[Chunk {chunk_idx + 1}/{total}] Exception in worker: {e}")
-            result_queue.put((-1, []))
-
-    def _run_transcription_process_with_timeout(
-        self,
-        target_func,  # kept for API compatibility but not used
-        args: tuple,  # (chunk_wav, model, language, whisper_bin, idx, total, whisper_word_timestamps, initial_prompt, tmp_dir)
-        timeout: int,
-        chunk_display_idx: int,
-        total_chunks: int,
-    ) -> list | None:
-        """
-        Runs whisper CLI directly via subprocess.Popen with threading.Timer for timeout.
-        Replaces multiprocessing approach which suffered from spawn-crash / orphan-process bugs
-        on macOS Python 3.14 (worker Process crashed on import, leaving whisper as orphan).
-        """
-        import os, signal, threading, subprocess, json
-
-        # Unpack args: (chunk_wav, model, language, whisper_bin, idx, total, whisper_word_timestamps, initial_prompt, tmp_dir)
-        chunk_wav, model, language, whisper_bin, idx, total, whisper_word_timestamps, initial_prompt, tmp_dir = args
-        whisper_bin = whisper_bin or self._require_whisper_cli()
-        if not whisper_bin:
-            return None
-
-        whisper_cmd = [
-            whisper_bin,
-            chunk_wav,
-            "--model",
-            model,
-            "--language",
-            language,
-            "--output_format",
-            "json",
-            "--output_dir",
-            tmp_dir,
-        ]
-        if whisper_word_timestamps:
-            whisper_cmd += ["--word_timestamps", "True"]
-        if initial_prompt:
-            whisper_cmd += ["--initial_prompt", initial_prompt]
-
-        chunk_stem = os.path.splitext(os.path.basename(chunk_wav))[0]
-        chunk_json = os.path.join(tmp_dir, chunk_stem + ".json")
-
-        timed_out = threading.Event()
-
-        def _kill_proc(proc):
-            timed_out.set()
-            logging.warning(
-                f"[Chunk {chunk_display_idx}/{total_chunks}] Timeout after {timeout}s, killing whisper pid={proc.pid}"
-            )
-            try:
-                pgid = os.getpgid(proc.pid)
-                os.killpg(pgid, signal.SIGKILL)
-                logging.info(
-                    f"[Chunk {chunk_display_idx}/{total_chunks}] Killed whisper pgid={pgid}"
-                )
-            except Exception as e:
-                logging.warning(
-                    f"[Chunk {chunk_display_idx}/{total_chunks}] killpg failed: {e}"
-                )
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-
-        try:
-            proc = subprocess.Popen(
-                whisper_cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                start_new_session=True,
-            )
-            timer = threading.Timer(timeout, _kill_proc, args=(proc,))
-            timer.start()
-            try:
-                stdout, stderr = proc.communicate()
-            finally:
-                timer.cancel()
-
-            if timed_out.is_set():
-                return None
-
-            if proc.returncode == 0 and os.path.exists(chunk_json):
-                with open(chunk_json, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                segments = data.get("segments", [])
-                logging.info(
-                    f"[Chunk {chunk_display_idx}/{total_chunks}] Got {len(segments)} segments"
-                )
-                return segments
-            else:
-                logging.error(
-                    f"[Chunk {chunk_display_idx}/{total_chunks}] whisper failed rc={proc.returncode} "
-                    f"json_exists={os.path.exists(chunk_json)} stderr={stderr.decode(errors='replace')[:200]}"
-                )
-                return []
-        except Exception as e:
-            logging.error(
-                f"[Chunk {chunk_display_idx}/{total_chunks}] Exception running whisper: {e}"
-            )
-            return None
-
-    def _run_asr_whisper_cli(
-        self, audio_path: str, model: str = "medium", language: str = "en"
-    ) -> list:
-        """
-        Chunked whisper CLI fallback with segment-level cache, timeout, and overlap merging.
-        Splits audio into chunks via ffmpeg, runs whisper per chunk, merges results.
-        Uses multiprocessing.Process per chunk for reliable timeout enforcement.
-        Used when faster-whisper is not available.
-        """
-        import tempfile
-        import shutil
-
-        whisper_bin = self._require_whisper_cli()
-        if not whisper_bin:
-            return []
-        initial_prompt = self._resolve_asr_initial_prompt(language)
-
-        duration = self._get_audio_duration(audio_path)
-        logging.info(
-            f"[whisper-cli] Audio duration: {duration:.1f}s ({duration / 60:.1f} min)"
-        )
-
-        # Setup cache
-        self.asr_cache_dir.mkdir(parents=True, exist_ok=True)
-        cache_key_prefix = self._build_asr_cache_key_prefix(
-            "", audio_path, model, language
-        )
-
-        # Build chunks
-        chunks = self._build_asr_chunk_windows(duration)
-
-        total = len(chunks)
-        logging.info(
-            f"[whisper-cli] Processing {total} chunks (chunk_duration={self.asr_chunk_duration}s, overlap={self.asr_overlap_seconds}s)"
-        )
-
-        all_segments = []
-        failed_chunks = []
-        tmp_dir = tempfile.mkdtemp(prefix="asr_chunks_")
-
-        try:
-            for idx, chunk_start, chunk_end in chunks:
-                cache_file = self._build_asr_chunk_cache_file(cache_key_prefix, idx)
-                chunk_span = chunk_end - chunk_start
-                chunk_label = (
-                    f"chunk {idx + 1}/{total} "
-                    f"[{self._format_duration_mmss(chunk_start)}"
-                    f" -> {self._format_duration_mmss(chunk_end)}, "
-                    f"len={self._format_duration_mmss(chunk_span)}]"
-                )
-                chunk_wav = os.path.join(tmp_dir, f"chunk_{idx:03d}.wav")
-                def _process_chunk():
-                    logging.info(
-                        f"[whisper-cli] {chunk_label}: extracting audio for transcription"
-                    )
-
-                    ffmpeg_cmd = [
-                        self.ffmpeg_bin,
-                        "-y",
-                        "-ss",
-                        str(chunk_start),
-                        "-t",
-                        str(chunk_end - chunk_start),
-                        "-i",
-                        audio_path,
-                        "-ar",
-                        "16000",
-                        "-ac",
-                        "1",
-                        chunk_wav,
-                    ]
-                    try:
-                        ffmpeg_result = subprocess.run(
-                            ffmpeg_cmd,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE,
-                            timeout=120,
-                        )
-                        if ffmpeg_result.returncode != 0:
-                            logging.warning(
-                                f"[whisper-cli] {chunk_label}: ffmpeg extraction failed, skipping"
-                            )
-                            return None
-                    except subprocess.TimeoutExpired:
-                        logging.warning(
-                            f"[whisper-cli] {chunk_label}: ffmpeg timeout, skipping"
-                        )
-                        return None
-
-                    logging.info(
-                        f"[whisper-cli] {chunk_label}: starting transcription "
-                        f"(timeout={self.asr_segment_timeout}s, word_timestamps={self.whisper_word_timestamps}, "
-                        f"initial_prompt={'on' if initial_prompt else 'off'})"
-                    )
-                    chunk_segments_raw = self._run_transcription_process_with_timeout(
-                        target_func=Analyzer._transcribe_chunk_whisper_cli,
-                        args=(
-                            chunk_wav,
-                            model,
-                            language,
-                            whisper_bin,
-                            idx + 1,
-                            total,
-                            self.whisper_word_timestamps,
-                            initial_prompt,
-                            tmp_dir,
-                        ),
-                        timeout=self.asr_segment_timeout,
-                        chunk_display_idx=idx + 1,
-                        total_chunks=total,
-                    )
-
-                    try:
-                        if chunk_segments_raw is None:
-                            logging.error(
-                                f"[whisper-cli] {chunk_label}: transcription failed or timed out"
-                            )
-                            return None
-
-                        chunk_segments = []
-                        cache_segments = []
-                        for seg in chunk_segments_raw:
-                            cache_words = []
-                            abs_words = []
-                            for w in seg.get("words", []):
-                                if not isinstance(w, dict):
-                                    continue
-                                cache_words.append(
-                                    {
-                                        "word": w.get("word", ""),
-                                        "start": round(w.get("start", 0), 3),
-                                        "end": round(w.get("end", 0), 3),
-                                    }
-                                )
-                                abs_words.append(
-                                    {
-                                        "word": w.get("word", ""),
-                                        "start": round(w.get("start", 0) + chunk_start, 3),
-                                        "end": round(w.get("end", 0) + chunk_start, 3),
-                                    }
-                                )
-
-                            cache_segments.append(
-                                {
-                                    "start": round(seg.get("start", 0), 3),
-                                    "end": round(seg.get("end", 0), 3),
-                                    "text": seg.get("text", ""),
-                                    "words": cache_words,
-                                }
-                            )
-                            chunk_segments.append(
-                                {
-                                    "start": round(seg.get("start", 0) + chunk_start, 3),
-                                    "end": round(seg.get("end", 0) + chunk_start, 3),
-                                    "text": seg.get("text", ""),
-                                    "words": abs_words,
-                                }
-                            )
-
-                        logging.info(
-                            f"[whisper-cli] {chunk_label}: transcription successful, prepared {len(chunk_segments)} segments"
-                        )
-                        return chunk_segments, cache_segments
-                    finally:
-                        chunk_json = os.path.splitext(chunk_wav)[0] + ".json"
-                        for tmp_f in [chunk_wav, chunk_json]:
-                            try:
-                                os.remove(tmp_f)
-                            except Exception:
-                                pass
-
-                chunk_segments = self._run_cached_asr_chunk(
-                    "whisper-cli",
-                    cache_file,
-                    chunk_label,
-                    chunk_start,
-                    chunk_end - chunk_start,
-                    _process_chunk,
-                )
-                if chunk_segments is None:
-                    failed_chunks.append((idx, chunk_start, chunk_end))
-                    continue
-
-                all_segments.extend(chunk_segments)
-                logging.info(
-                    f"[whisper-cli] {chunk_label}: completed with {len(chunk_segments)} segments"
-                )
-
-        finally:
-            try:
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-            except Exception:
-                pass
-
-        if failed_chunks:
-            logging.warning(
-                f"[whisper-cli] {len(failed_chunks)} failed chunks: {[(c[0], c[1], c[2]) for c in failed_chunks]}"
-            )
-            logging.warning(
-                "[whisper-cli] Re-run to resume — completed chunks are cached"
-            )
-
-        merged = self._merge_asr_segments(all_segments)
-        logging.info(f"[whisper-cli] ASR complete: {len(merged)} segments total")
-        return merged
-
-    def _run_asr_srt_fallback(self, audio_path: str, model: str, language: str) -> list:
-        """Fallback: run Whisper with SRT output (no word timestamps)."""
-        try:
-            whisper_bin = self._require_whisper_cli()
-            if not whisper_bin:
-                return []
-
-            cmd = [
-                whisper_bin,
-                audio_path,
-                "--model",
-                model,
-                "--language",
-                language,
-                "--output_format",
-                "srt",
-                "--output_dir",
-                os.path.dirname(audio_path),
-            ]
-            result = subprocess.run(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-            )
-            if result.returncode != 0:
-                logging.error(f"Whisper SRT also failed: {result.stderr[-200:]}")
-                return []
-            srt_path = audio_path.replace(".wav", ".srt")
-            if os.path.exists(srt_path):
-                return self._parse_srt(srt_path)
-            return []
-        except Exception as e:
-            logging.error(f"ASR SRT fallback failed: {e}")
-            return []
-
-    def _parse_whisper_json(self, json_path: str) -> list:
-        """
-        Parse Whisper JSON output into segments with optional word-level data.
-
-        Returns segments with 'words' field when word_timestamps=True.
-        """
-        try:
-            with open(json_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-
-            segments = []
-            for seg in data.get("segments", []):
-                entry = {
-                    "start": float(seg["start"]),
-                    "end": float(seg["end"]),
-                    "text": seg["text"].strip(),
-                }
-                # Include word-level timestamps if available
-                if "words" in seg and seg["words"]:
-                    entry["words"] = [
-                        {
-                            "word": w.get("word", "").strip(),
-                            "start": float(w.get("start", seg["start"])),
-                            "end": float(w.get("end", seg["end"])),
-                        }
-                        for w in seg["words"]
-                    ]
-                segments.append(entry)
-
-            return segments
-        except Exception as e:
-            logging.error(f"Failed to parse Whisper JSON: {e}")
-            return []
 
     def extract_soft_subtitle(self, video_path: str) -> list:
         """

@@ -9,7 +9,7 @@
 ## 功能概览
 
 - 下载 YouTube、TikTok、X/Twitter 视频，或直接处理本地文件
-- 在 Apple Silicon 上优先使用 `mlx-whisper` 做 ASR，其余环境回退到 `faster-whisper` 或 `whisper` CLI
+- 在 Apple Silicon 上优先使用 `mlx-whisper` 做 ASR，其余环境回退到 `faster-whisper`
 - 对长视频按分片执行 ASR，并支持分片缓存复用与中断续跑
 - 做场景变化检测和主题结构分析，辅助切片
 - 翻译并生成双语字幕
@@ -50,7 +50,6 @@ pip install -r requirements.txt
 ```bash
 python main.py --help
 which ffmpeg
-which whisper
 ```
 
 ## 常用命令
@@ -165,7 +164,6 @@ which whisper
 - `ASR_LANGUAGE`
 - `FASTER_WHISPER_LOCAL_MODEL_DIR`
 - `MLX_WHISPER_LOCAL_MODEL_DIR`
-- `WHISPER_CLI_PATH`
 - `DOWNLOADS_DIR`
 - `OUTPUT_DIR`
 - `ANALYSIS_DIR`
@@ -206,11 +204,6 @@ cache/
 5. 已有字幕时用 `--burn-only`
 
 ## 常见问题
-
-`whisper` 找不到：
-
-- 确认当前虚拟环境已激活
-- 确认 `openai-whisper` 装在同一个环境中
 
 X/Twitter 下载失败：
 

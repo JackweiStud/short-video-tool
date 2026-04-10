@@ -67,11 +67,11 @@
 ### Added
 - `subtitle_detect.py`: 新增 `_ocr_region_with_vision()` 函数，使用 Apple Vision Framework 对字幕区域图像进行 OCR（支持中文简体/繁体 + 英文）
 - `subtitle_detect.py`: 新增 `_detect_language_from_ocr_regions()` 函数，对视频多帧多区域采样 OCR，合并文本后按中文字符占比判断语言
-- `subtitle_detect.py`: 新增 `_detect_language_from_audio()` 函数，作为 OCR 失败时的兜底语言检测（调用 Whisper CLI）
+- `subtitle_detect.py`: 新增 `_detect_language_from_audio()` 函数，作为 OCR 失败时的兜底语言检测（使用 faster-whisper）
 - `requirements.txt`: 新增 `pyobjc-framework-Vision>=12.0` 依赖
 
 ### Changed
-- `subtitle_detect.py` 路径 B（硬字幕检测）语言识别从 Whisper 音频语言检测改为 Apple Vision OCR，修复翻译类视频（英文原声+中文硬字幕）被误判为 `en` 的问题
+- `subtitle_detect.py` 路径 B（硬字幕检测）语言识别从音频语言检测改为 Apple Vision OCR，修复翻译类视频（英文原声+中文硬字幕）被误判为 `en` 的问题
 - OCR 扫描区域扩展为顶部25%/底部25%/中部30%，覆盖竖屏视频多样字幕位置
 - OCR 语言检测不再依赖像素密度预筛，直接对所有区域跑 Vision OCR
 
@@ -106,7 +106,7 @@
   - 鲁棒的错误处理和重试机制
 
 - **智能分析模块** (`analyzer.py`)
-  - 基于 openai-whisper 的高精度 ASR（自动语音识别）
+- 基于 mlx-whisper / faster-whisper 的高精度 ASR（自动语音识别）
   - 基于 librosa 的音频高潮检测（RMS 能量 + 频谱质心 + 过零率）
   - 基于 PySceneDetect 的场景切换检测
   - 全面的校验和错误处理
@@ -206,7 +206,7 @@
 
 #### 核心依赖
 - yt-dlp==2026.3.13 (视频下载)
-- openai-whisper (ASR 语音识别，需要 ffmpeg)
+- faster-whisper / mlx-whisper (ASR 语音识别，需要 ffmpeg)
 - librosa==0.11.0 (音频分析)
 - scenedetect==0.6.7.1 (场景检测)
 - opencv-python==4.13.0.92 (视频处理)

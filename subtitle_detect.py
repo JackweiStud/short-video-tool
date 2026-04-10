@@ -9,12 +9,6 @@ from pathlib import Path
 from enum import Enum
 from typing import Tuple, List, Optional, Dict, Any
 
-# Assuming Whisper functionality is available via a module like 'transcriber'
-# If not, this will need to be adjusted based on the actual project structure
-# For now, let's assume a function that takes an audio path and returns text.
-# The task specifically mentioned "复用现有 ffprobe / Whisper", so it must be available.
-# Let's mock it for the initial implementation, and refine if actual Whisper module needs to be imported.
-
 logger = logging.getLogger(__name__)
 
 # Configure logging to console and file (similar to step7_full_video.py)
@@ -331,11 +325,13 @@ def _extract_frame(video_path: str, timestamp: float, output_path: str) -> bool:
 
 def _detect_language_from_audio(video_path: str, duration: float, whisper_model: str = "tiny") -> str:
     """
-    Extract a 30s audio clip from the middle of the video and run Whisper
-    language detection. Returns the detected language code (e.g. 'en', 'zh') or '' on failure.
-    Whisper auto-detects language when --language is not specified.
+    Extract a 30s audio clip from the middle of the video and detect language.
+    Apple Silicon prefers mlx-whisper; other environments use faster-whisper.
+    Returns the detected language code (e.g. 'en', 'zh') or '' on failure.
     """
     try:
+        import platform
+
         mid = max(0.0, duration / 2 - 15)
         with tempfile.TemporaryDirectory() as tmpdir:
             audio_path = os.path.join(tmpdir, "sample.wav")
@@ -350,28 +346,46 @@ def _detect_language_from_audio(video_path: str, duration: float, whisper_model:
                 logging.warning(f"Audio extraction failed: {r.stderr[-200:]}")
                 return ""
 
-            # Run Whisper without --language so it auto-detects
-            cmd2 = [
-                "whisper", audio_path,
-                "--model", whisper_model,
-                "--output_format", "json",
-                "--output_dir", tmpdir,
-                "--fp16", "False",
-            ]
-            r2 = subprocess.run(cmd2, capture_output=True, text=True, timeout=120)
-            if r2.returncode != 0:
-                logging.warning(f"Whisper failed: {r2.stderr[-300:]}")
-                return ""
+            if platform.system() == "Darwin" and platform.machine() == "arm64":
+                try:
+                    import mlx_whisper
 
-            json_path = os.path.join(tmpdir, "sample.json")
-            if not os.path.exists(json_path):
-                logging.warning("Whisper JSON output not found")
-                return ""
+                    result = mlx_whisper.transcribe(
+                        audio_path,
+                        language=None,
+                        word_timestamps=False,
+                    )
+                    lang = ""
+                    if isinstance(result, dict):
+                        lang = result.get("language", "") or ""
+                    if lang:
+                        logging.info(
+                            f"mlx-whisper detected language: '{lang}' for {video_path}"
+                        )
+                        return lang
+                    logging.warning(
+                        "mlx-whisper did not return a language; falling back to faster-whisper for language detection"
+                    )
+                except ImportError:
+                    logging.info(
+                        "mlx-whisper not installed on Apple Silicon; falling back to faster-whisper for language detection"
+                    )
+                except Exception as e:
+                    logging.warning(f"mlx-whisper language detection failed: {e}")
 
-            with open(json_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            lang = data.get("language", "")
-            logging.info(f"Whisper detected language: '{lang}' for {video_path}")
+            from faster_whisper import WhisperModel
+
+            model = WhisperModel(whisper_model, device="cpu", compute_type="int8")
+            segments, info = model.transcribe(
+                audio_path,
+                language=None,
+                beam_size=1,
+                vad_filter=False,
+                word_timestamps=False,
+            )
+            _ = list(segments)
+            lang = getattr(info, "language", "") or ""
+            logging.info(f"faster-whisper detected language: '{lang}' for {video_path}")
             return lang
     except Exception as e:
         logging.warning(f"_detect_language_from_audio failed: {e}")
@@ -1136,13 +1150,13 @@ def detect_subtitle_status(video_path: str, sample_count: int = 5) -> Tuple[Subt
         )
         return ocr_status, ocr_confidence, ocr_text_lang_detected, subtitle_top_ratio
 
-    # --- Strategy 3: Audio language detection via Whisper (last resort) ---
+    # --- Strategy 3: Audio language detection via mlx-whisper / faster-whisper (last resort) ---
     audio_lang = _detect_language_from_audio(video_path, duration)
     if audio_lang == 'zh':
-        logging.info("Audio language: Chinese detected via Whisper.")
+        logging.info("Audio language: Chinese detected via mlx-whisper / faster-whisper.")
         return SubtitleStatus.ZH, 0.8, 'zh', None
     elif audio_lang == 'en':
-        logging.info("Audio language: English detected via Whisper. No hard subtitle detected (OCR found nothing).")
+        logging.info("Audio language: English detected via mlx-whisper / faster-whisper. No hard subtitle detected (OCR found nothing).")
         return SubtitleStatus.NONE, 0.8, None, None
 
     logging.info("No subtitles or discernible language detected.")

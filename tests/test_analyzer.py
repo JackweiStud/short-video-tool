@@ -215,55 +215,6 @@ class TestAnalyzerFunctionality:
         assert captured["kwargs"]["initial_prompt"] == "中文 prompt"
         assert captured["kwargs"]["language"] == "zh"
 
-    def test_whisper_cli_command_includes_initial_prompt(self, temp_dir, monkeypatch):
-        analyzer = Analyzer()
-        analyzer.config.asr_initial_prompt_enabled = True
-        analyzer.config.asr_initial_prompt_text = "中文 prompt"
-
-        commands = []
-
-        class FakePopen:
-            def __init__(self, cmd, stdout=None, stderr=None, start_new_session=None):
-                commands.append(cmd)
-                self.cmd = cmd
-                self.stdout = stdout
-                self.stderr = stderr
-                self.start_new_session = start_new_session
-                self.returncode = 0
-                self.pid = 12345
-
-            def communicate(self):
-                return b"", b""
-
-        monkeypatch.setattr(analyzer_module.subprocess, "Popen", FakePopen)
-        monkeypatch.setattr(analyzer_module.os, "getpgid", lambda pid: pid)
-        monkeypatch.setattr(analyzer_module.os, "killpg", lambda pgid, sig: None)
-        monkeypatch.setattr(analyzer_module.os.path, "exists", lambda path: False)
-        monkeypatch.setattr(analyzer, "_require_whisper_cli", lambda: "/usr/bin/whisper")
-
-        result = analyzer._run_transcription_process_with_timeout(
-            target_func=Analyzer._transcribe_chunk_whisper_cli,
-            args=(
-                os.path.join(temp_dir, "chunk_000.wav"),
-                "medium",
-                "zh",
-                "/usr/bin/whisper",
-                1,
-                1,
-                True,
-                "中文 prompt",
-                temp_dir,
-            ),
-            timeout=5,
-            chunk_display_idx=1,
-            total_chunks=1,
-        )
-
-        assert result == []
-        assert commands
-        assert "--initial_prompt" in commands[0]
-        assert "中文 prompt" in commands[0]
-
     def test_summary_only_analysis_skips_other_steps(self, temp_dir):
         analyzer = Analyzer()
         video_path = os.path.join(temp_dir, "sample.mp4")

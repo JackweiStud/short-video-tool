@@ -30,7 +30,6 @@ Pillow>=10.0.0
 pyobjc-framework-Vision>=12.0
 
 faster-whisper
-openai-whisper
 
 # ASR - Apple Silicon GPU acceleration (macOS arm64 only)
 mlx-whisper==0.4.3

@@ -11,7 +11,7 @@ Core entry point: [`main.py`](main.py)
 ## What It Does
 
 - Download videos from YouTube, TikTok, and X/Twitter, or process a local file directly
-- Run ASR with `mlx-whisper` on Apple Silicon when available, otherwise fall back to `faster-whisper` or `whisper` CLI
+- Run ASR with `mlx-whisper` on Apple Silicon when available, otherwise fall back to `faster-whisper`
 - Chunk long videos for ASR with per-chunk cache reuse and resume support
 - Detect scene changes and topic structure for clip selection
 - Translate and generate bilingual subtitles
@@ -52,7 +52,6 @@ Quick verification:
 ```bash
 python main.py --help
 which ffmpeg
-which whisper
 ```
 
 ## Common Commands
@@ -167,7 +166,6 @@ Common variables:
 - `ASR_LANGUAGE`
 - `FASTER_WHISPER_LOCAL_MODEL_DIR`
 - `MLX_WHISPER_LOCAL_MODEL_DIR`
-- `WHISPER_CLI_PATH`
 - `DOWNLOADS_DIR`
 - `OUTPUT_DIR`
 - `ANALYSIS_DIR`
@@ -208,11 +206,6 @@ In summary Markdown, the final section is an `X Post` copy block that can be reu
 5. Use `--burn-only` when subtitles already exist
 
 ## Troubleshooting
-
-`whisper` not found:
-
-- ensure the virtual environment is activated
-- install `openai-whisper` into the same environment
 
 X/Twitter download fails:
 
