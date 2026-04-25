@@ -431,6 +431,26 @@ def _parse_ffmpeg_color_to_rgba(color: str) -> tuple[int, int, int, int]:
     return r, g, b, max(0, min(255, alpha))
 
 
+def _get_clean_dual_subtitle_style() -> Dict[str, Dict[str, Any]]:
+    """Return the default clean bilingual style for videos without source hard subtitles."""
+    return {
+        "en": {
+            "primary_ass": "&H00FCFAF8&",  # #F8FAFC
+            "back_ass": "&H292A170F&",     # rgba(15, 23, 42, 0.84)
+            "primary_rgba": (248, 250, 252, 255),
+            "background_rgba": (15, 23, 42, 214),
+            "font_scale": 1.0,
+        },
+        "zh": {
+            "primary_ass": "&H008AE8FF&",  # #FFE88A
+            "back_ass": "&H290C202D&",     # rgba(45, 32, 12, 0.84)
+            "primary_rgba": (255, 232, 138, 255),
+            "background_rgba": (45, 32, 12, 214),
+            "font_scale": 1.02,
+        },
+    }
+
+
 def _build_hard_subtitle_mask_overlay_image(
     video_width: int,
     video_height: int,
@@ -667,6 +687,11 @@ def _make_subtitle_frame(
     margin_bottom_zh = layout["margin_v_zh"]
     margin_bottom_en = layout["margin_v_en"]
     inter_gap = layout["inter_gap"]
+    clean_style = _get_clean_dual_subtitle_style() if not hard_subtitle_mask else None
+    if clean_style:
+        en_fontsize = max(1, round(en_fontsize * clean_style["en"]["font_scale"]))
+        zh_fontsize = max(1, round(zh_fontsize * clean_style["zh"]["font_scale"]))
+        margin_bottom_en = margin_bottom_zh + zh_fontsize + inter_gap
 
     try:
         en_font = ImageFont.truetype(config.font_name_en, en_fontsize) if config.font_name_en else ImageFont.load_default()
@@ -688,6 +713,45 @@ def _make_subtitle_frame(
             inter_gap=inter_gap,
         )
 
+    def _draw_text_block(lines, font, y, fill, background_fill=None):
+        line_heights = [
+            draw.textbbox((0, 0), line, font=font)[3] - draw.textbbox((0, 0), line, font=font)[1]
+            for line in lines
+        ]
+        line_spacing = int((zh_fontsize if font is zh_font else en_fontsize) * 0.2)
+        total_height = sum(line_heights) + line_spacing * max(len(lines) - 1, 0)
+
+        if background_fill:
+            line_widths = []
+            for line in lines:
+                bbox = draw.textbbox((0, 0), line, font=font)
+                line_widths.append(bbox[2] - bbox[0])
+            pad_x = max(14, round(width * 0.012))
+            pad_y = max(6, round(total_height * 0.16))
+            box_w = max(line_widths) + pad_x * 2 if line_widths else 0
+            box_x = (width - box_w) // 2
+            box_y = int(y - pad_y)
+            radius = max(8, round((total_height + pad_y * 2) * 0.22))
+            draw.rounded_rectangle(
+                (box_x, box_y, box_x + box_w, box_y + total_height + pad_y * 2),
+                radius=radius,
+                fill=background_fill,
+            )
+
+        current_y = y
+        for idx, line in enumerate(lines):
+            bbox = draw.textbbox((0, 0), line, font=font)
+            tw = bbox[2] - bbox[0]
+            x = (width - tw) // 2
+            for dx in [-1, 0, 1]:
+                for dy in [-1, 0, 1]:
+                    if dx != 0 or dy != 0:
+                        draw.text((x + dx, current_y + dy), line, font=font, fill=(0, 0, 0, 150))
+            draw.text((x, current_y), line, font=font, fill=fill)
+            current_y += line_heights[idx] + line_spacing
+
+        return total_height
+
     # Draw Chinese line (bottom, yellow)
     if zh_text:
         wrapped_zh = _wrap_text_by_pixel(zh_text, zh_font, draw, int(width * 0.85))
@@ -701,18 +765,13 @@ def _make_subtitle_frame(
         else:
             y = height - margin_bottom_zh - total_zh_height
         zh_top = y
-        
-        for i, line in enumerate(zh_lines):
-            bbox = draw.textbbox((0, 0), line, font=zh_font)
-            tw = bbox[2] - bbox[0]
-            x = (width - tw) // 2
-            # Black outline
-            for dx in [-2, -1, 0, 1, 2]:
-                for dy in [-2, -1, 0, 1, 2]:
-                    if dx != 0 or dy != 0:
-                        draw.text((x + dx, y + dy), line, font=zh_font, fill=(0, 0, 0, 200))
-            draw.text((x, y), line, font=zh_font, fill=(255, 255, 0, 255))
-            y += zh_line_heights[i] + zh_line_spacing
+        _draw_text_block(
+            zh_lines,
+            zh_font,
+            y,
+            clean_style["zh"]["primary_rgba"] if clean_style else (255, 255, 0, 255),
+            clean_style["zh"]["background_rgba"] if clean_style else None,
+        )
     else:
         zh_top = height - margin_bottom_zh
 
@@ -728,16 +787,13 @@ def _make_subtitle_frame(
             y = mask_positions["en_bottom"] - total_en_height
         else:
             y = zh_top - total_en_height - margin_bottom_en # Use en margin for gap
-        for i, line in enumerate(en_lines):
-            bbox = draw.textbbox((0, 0), line, font=en_font)
-            tw = bbox[2] - bbox[0]
-            x = (width - tw) // 2
-            for dx in [-2, -1, 0, 1, 2]:
-                for dy in [-2, -1, 0, 1, 2]:
-                    if dx != 0 or dy != 0:
-                        draw.text((x + dx, y + dy), line, font=en_font, fill=(0, 0, 0, 200))
-            draw.text((x, y), line, font=en_font, fill=(255, 255, 255, 255))
-            y += en_line_heights[i] + en_line_spacing
+        _draw_text_block(
+            en_lines,
+            en_font,
+            y,
+            clean_style["en"]["primary_rgba"] if clean_style else (255, 255, 255, 255),
+            clean_style["en"]["background_rgba"] if clean_style else None,
+        )
 
     import numpy as np
     return np.array(img)
@@ -1350,30 +1406,7 @@ def _hard_burn_bilingual_ffmpeg(video_path: str, en_srt_path: str, zh_srt_path: 
     def esc(p):
         return p.replace('\\', '/').replace(':', '\\:')
 
-    cjk_font = _find_cjk_font(config) or ""
-    cjk_font_esc = esc(cjk_font) if cjk_font else ""
-
-    # EN: white, bottom-center, MarginV (above ZH)
-    en_style = (
-        f"FontName={config.font_name_en},"
-        f"Fontsize={en_fontsize},"
-        f"PrimaryColour=&H00FFFFFF&,"
-        f"OutlineColour=&H00000000&,"
-        f"Outline=0.8,"
-        f"Alignment=2,"        # bottom-center
-        f"MarginV={margin_v_en}"
-    )
-    # ZH: yellow, bottom-center always; when EN hard subtitle detected, MarginV pushes it above EN hard sub
     zh_alignment = 2  # bottom-center (MarginV controls vertical position)
-    zh_style = (
-        f"FontName={config.font_name_zh if cjk_font_esc else config.font_name_en}," # Use configured ZH font
-        f"Fontsize={zh_fontsize},"
-        f"PrimaryColour=&H0000FFFF&,"
-        f"OutlineColour=&H00000000&,"
-        f"Outline=1,"
-        f"Alignment={zh_alignment},"
-        f"MarginV={margin_v_zh}"
-    )
 
     def _srt_to_ass(srt_path: str, style_line: str, play_res_x: int, play_res_y: int, pos_override: tuple = None) -> str:
         """Convert SRT to ASS with explicit style, write to temp file, return path."""
@@ -1429,30 +1462,50 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         return tmp.name
 
     # Build ASS style lines (Name,Font,Size,PrimaryColour,...,MarginV,Encoding)
-    def _ass_style_line(fontname, fontsize, primary_colour, outline_colour, outline, alignment, margin_v):
-        return (f"{fontname},{fontsize},{primary_colour},&H000000FF&,{outline_colour},&H00000000&,"
-                f"0,0,0,0,100,100,0,0,1,{outline},0,{alignment},10,10,{margin_v},1")
+    def _ass_style_line(
+        fontname,
+        fontsize,
+        primary_colour,
+        outline_colour,
+        outline,
+        alignment,
+        margin_v,
+        back_colour="&H00000000&",
+        border_style=1,
+        shadow=0,
+    ):
+        return (f"{fontname},{fontsize},{primary_colour},&H000000FF&,{outline_colour},{back_colour},"
+                f"0,0,0,0,100,100,0,0,{border_style},{outline},{shadow},{alignment},10,10,{margin_v},1")
 
     video_w = video_dimensions['width'] if video_dimensions else 1920
     video_h = video_dimensions['height'] if video_dimensions else 1080
+    clean_style = _get_clean_dual_subtitle_style() if not hard_subtitle_mask and not has_en_hard_subtitle and not has_zh_hard_subtitle else None
+    if clean_style:
+        en_fontsize = max(1, round(en_fontsize * clean_style["en"]["font_scale"]))
+        zh_fontsize = max(1, round(zh_fontsize * clean_style["zh"]["font_scale"]))
+        margin_v_en = margin_v_zh + zh_fontsize + layout["inter_gap"]
 
     zh_ass_style = _ass_style_line(
         fontname=config.font_name_zh or config.font_name_en,
         fontsize=zh_fontsize,
-        primary_colour='&H0000FFFF&',   # yellow
-        outline_colour='&H00000000&',
-        outline=1,
+        primary_colour=clean_style["zh"]["primary_ass"] if clean_style else '&H0000FFFF&',
+        outline_colour=clean_style["zh"]["back_ass"] if clean_style else '&H00000000&',
+        outline=8 if clean_style else 1,
         alignment=zh_alignment,
-        margin_v=margin_v_zh
+        margin_v=margin_v_zh,
+        back_colour=clean_style["zh"]["back_ass"] if clean_style else "&H00000000&",
+        border_style=3 if clean_style else 1,
     )
     en_ass_style = _ass_style_line(
         fontname=config.font_name_en,
         fontsize=en_fontsize,
-        primary_colour='&H00FFFFFF&',   # white
-        outline_colour='&H00000000&',
-        outline=1,
+        primary_colour=clean_style["en"]["primary_ass"] if clean_style else '&H00FFFFFF&',
+        outline_colour=clean_style["en"]["back_ass"] if clean_style else '&H00000000&',
+        outline=8 if clean_style else 1,
         alignment=2,
-        margin_v=margin_v_en
+        margin_v=margin_v_en,
+        back_colour=clean_style["en"]["back_ass"] if clean_style else "&H00000000&",
+        border_style=3 if clean_style else 1,
     )
 
     # For single-soft-subtitle modes, use absolute pos override in PlayRes coords.

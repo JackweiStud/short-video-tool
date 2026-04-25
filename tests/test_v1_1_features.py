@@ -59,6 +59,66 @@ class TestTranslatorSiliconflow:
 
 class TestDimensionScaling:
     """Test UI/UX scaling for different aspect ratios."""
+
+    def test_clean_dual_subtitle_style_uses_distinct_text_and_background_colours(self):
+        """No-hard-subtitle dual burn should use the selected clean subtitle palette."""
+        style = embed_subtitles._get_clean_dual_subtitle_style()
+
+        assert style["en"]["primary_ass"] == "&H00FCFAF8&"
+        assert style["zh"]["primary_ass"] == "&H008AE8FF&"
+        assert style["en"]["back_ass"] == "&H292A170F&"
+        assert style["zh"]["back_ass"] == "&H290C202D&"
+        assert style["zh"]["font_scale"] > style["en"]["font_scale"]
+        assert style["en"]["primary_rgba"] != style["zh"]["primary_rgba"]
+        assert style["en"]["background_rgba"] != style["zh"]["background_rgba"]
+
+    def test_no_hard_subtitle_ffmpeg_ass_uses_clean_dual_background_style(self, temp_dir):
+        """FFmpeg fast path should write distinct text and background colors into ASS styles."""
+        video_path = os.path.join(temp_dir, "sample.mp4")
+        output_path = os.path.join(temp_dir, "out.mp4")
+        en_srt = os.path.join(temp_dir, "sample_en.srt")
+        zh_srt = os.path.join(temp_dir, "sample_zh.srt")
+        for path, text in [(video_path, "fake"), (en_srt, "Hello"), (zh_srt, "你好")]:
+            with open(path, "w", encoding="utf-8") as f:
+                if path.endswith(".srt"):
+                    f.write(f"1\n00:00:00,000 --> 00:00:01,000\n{text}\n\n")
+                else:
+                    f.write(text)
+
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured["vf"] = cmd[cmd.index("-vf") + 1]
+            with open(output_path, "wb") as f:
+                f.write(b"fake output")
+            result = MagicMock()
+            result.returncode = 0
+            result.stderr = ""
+            return result
+
+        with patch("embed_subtitles._get_video_dimensions", return_value={"width": 1920, "height": 1080}):
+            with patch("embed_subtitles.subprocess.run", side_effect=fake_run):
+                ok = embed_subtitles._hard_burn_bilingual_ffmpeg(
+                    video_path,
+                    en_srt,
+                    zh_srt,
+                    output_path,
+                    ocr_lang=None,
+                    hard_subtitle_mask=None,
+                )
+
+        assert ok is True
+        ass_paths = [part.removeprefix("ass=") for part in captured["vf"].split(",")]
+        ass_contents = [open(path, encoding="utf-8").read() for path in ass_paths]
+        combined = "\n".join(ass_contents)
+
+        assert "&H00FCFAF8&" in combined
+        assert "&H008AE8FF&" in combined
+        assert "&H292A170F&" in combined
+        assert "&H290C202D&" in combined
+        assert "Style: Default,Arial,56," in combined
+        assert "Style: Default,Heiti SC,60," in combined
+        assert ",0,0,3,8,0,2," in combined
     
     def test_font_size_scaling_on_vertical_video(self):
         """Font size in 9:16 (vertical) should be based on width (min dim)."""
