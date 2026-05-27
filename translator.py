@@ -196,6 +196,108 @@ def _get_video_dimensions(video_path: str) -> Optional[Dict]:
         logging.warning(f"无法获取视频尺寸 {video_path}: {e}")
     return None
 
+def _snap_chunk_intervals_to_word_boundaries(
+    chunks: List[str],
+    raw_ends: List[float],
+    seg_start: float,
+    seg_end: float,
+    words: List[Dict],
+    min_dur: float = 0.05,
+    chunk_end_word_indices: Optional[List[int]] = None,
+) -> List[tuple]:
+    """
+    Replace character-proportional chunk timestamps with timestamps snapped to
+    actual ASR word boundaries (word['end']).
+
+    Without this, split points often land inside a silence gap (e.g. the
+    speaker pauses for 2s after "Thanks for coming."): the first SRT line
+    lingers into the gap and the next line appears before the next word is
+    actually spoken, causing audible audio/subtitle drift.
+
+    Two modes:
+      1. **Exact mapping** (preferred). When `chunk_end_word_indices` is
+         provided, chunk i ends at words[idx].end directly. This is the
+         only correct way for EN where tokens map 1:1 to ASR words —
+         distance-based snap can otherwise pick the *next* word when char
+         proportion overshoots into a silent gap.
+      2. **Distance snap** (fallback). For ZH or when index mapping is
+         unavailable: for each non-last chunk, pick the nearest unused
+         word.end to raw_ends[i] (subject to monotonicity).
+
+    The last chunk always ends exactly at seg_end (no float drift).
+
+    Returns: list of (start, end) tuples, len == len(chunks).
+    """
+    n = len(chunks)
+    if n == 0:
+        return []
+    if n == 1:
+        return [(seg_start, seg_end)]
+
+    starts_fallback = [seg_start] + raw_ends[:-1]
+    fallback = list(zip(starts_fallback, raw_ends))
+
+    if not words:
+        return fallback
+
+    # --- Mode 1: exact mapping by word index ---
+    if chunk_end_word_indices is not None and len(chunk_end_word_indices) == n:
+        intervals = []
+        prev_end = seg_start
+        for i in range(n):
+            if i == n - 1:
+                intervals.append((prev_end, seg_end))
+                break
+            idx = chunk_end_word_indices[i]
+            if idx is None or idx < 0 or idx >= len(words):
+                # bad hint → fall back to raw_end for just this boundary
+                snapped = max(raw_ends[i], prev_end + min_dur)
+            else:
+                w_end_raw = words[idx].get('end')
+                if w_end_raw is None:
+                    snapped = max(raw_ends[i], prev_end + min_dur)
+                else:
+                    snapped = float(w_end_raw)
+                    if snapped <= prev_end:
+                        snapped = prev_end + min_dur
+                    if snapped >= seg_end:
+                        snapped = seg_end - min_dur
+            intervals.append((prev_end, snapped))
+            prev_end = snapped
+        return intervals
+
+    # --- Mode 2: distance snap fallback ---
+    candidates = sorted({
+        float(w['end']) for w in words
+        if isinstance(w, dict)
+        and 'end' in w
+        and seg_start < float(w['end']) < seg_end
+    })
+    if not candidates:
+        return fallback
+
+    intervals = []
+    prev_end = seg_start
+    remaining_cands = list(candidates)
+
+    for i in range(n - 1):
+        raw_end = raw_ends[i]
+        viable = [
+            c for c in remaining_cands
+            if c >= prev_end + min_dur and c <= seg_end - min_dur
+        ]
+        if not viable:
+            snapped = max(raw_end, prev_end + min_dur)
+        else:
+            snapped = min(viable, key=lambda c: abs(c - raw_end))
+            remaining_cands = [c for c in remaining_cands if c != snapped]
+        intervals.append((prev_end, snapped))
+        prev_end = snapped
+
+    intervals.append((prev_end, seg_end))
+    return intervals
+
+
 def _split_long_segments(
     segments: List[Dict],
     max_en_chars: int,
@@ -207,12 +309,16 @@ def _split_long_segments(
     Split ASR/translation segments whose text exceeds max_chars.
 
     Each oversized segment is broken into shorter chunks at punctuation
-    boundaries first, then at word/character boundaries.  Timestamps are
-    distributed proportionally to character count so the time axis stays
-    in sync with the original segment.
+    boundaries first, then at word/character boundaries.
+
+    Timestamp assignment:
+      - If the source segment carries ASR word-level timestamps (`words`),
+        each split point is snapped to the nearest word boundary so subtitle
+        cuts land on actual speech edges (not in silence gaps).
+      - Otherwise falls back to character-length proportional distribution.
 
     Args:
-        segments:  List of dicts with 'start', 'end', 'text' keys.
+        segments:  List of dicts with 'start', 'end', 'text', optionally 'words'.
         max_en_chars: Maximum character count per output segment for English.
         max_zh_chars: Maximum character count per output segment for Chinese.
         lang:      'en' (space-separated words) or 'zh' (character-level).
@@ -245,18 +351,25 @@ def _split_long_segments(
             result.append(seg)
             continue
 
-        # Build a flat list of tokens (words for EN, characters for ZH)
+        # Build a flat list of tokens (words for EN, characters for ZH).
+        # For EN we also track each token's original index so we can map the
+        # resulting chunks back to ASR words by index (1:1 with Whisper words).
         if is_zh:
             tokens = list(text)
         else:
             tokens = text.split(' ')
 
-        # Greedily pack tokens into chunks, preferring to break after punct
+        # Greedily pack tokens into chunks, preferring to break after punct.
+        # Alongside the text chunks, track the index (within `tokens`) of the
+        # LAST token of each chunk — used downstream for exact word-boundary
+        # mapping on the EN path.
         chunks: List[str] = []
+        chunk_last_token_idx: List[int] = []
         curr_tokens: List[str] = []
+        curr_token_indices: List[int] = []
         curr_len = 0
 
-        for tok in tokens:
+        for tok_idx, tok in enumerate(tokens):
             sep = '' if is_zh else ' '
             tok_len = len(tok) + (0 if is_zh else (1 if curr_tokens else 0))
 
@@ -267,61 +380,86 @@ def _split_long_segments(
                 for split_idx in range(len(curr_tokens) - 1, -1, -1):
                     if curr_tokens[split_idx].rstrip()[-1:] in break_punct:
                         left = sep.join(curr_tokens[: split_idx + 1]).strip()
-                        remainder = curr_tokens[split_idx + 1 :]
                         chunks.append(left)
+                        chunk_last_token_idx.append(curr_token_indices[split_idx])
+                        remainder = curr_tokens[split_idx + 1 :]
+                        remainder_idx = curr_token_indices[split_idx + 1 :]
                         curr_tokens = remainder + [tok]
+                        curr_token_indices = remainder_idx + [tok_idx]
                         curr_len = sum(len(t) + (0 if is_zh else 1) for t in curr_tokens)
                         flushed = True
                         break
                 if not flushed:
                     chunks.append(sep.join(curr_tokens).strip())
+                    chunk_last_token_idx.append(curr_token_indices[-1])
                     curr_tokens = [tok]
+                    curr_token_indices = [tok_idx]
                     curr_len = len(tok)
             else:
                 curr_tokens.append(tok)
+                curr_token_indices.append(tok_idx)
                 curr_len += tok_len
 
         if curr_tokens:
             chunks.append(('' if is_zh else ' ').join(curr_tokens).strip())
+            chunk_last_token_idx.append(curr_token_indices[-1])
 
-        # Remove empty chunks
-        chunks = [c for c in chunks if c]
-
-        if not chunks:
+        # Remove empty chunks (and the matching index entries)
+        kept = [(c, idx) for c, idx in zip(chunks, chunk_last_token_idx) if c]
+        if not kept:
             result.append(seg)
             continue
+        chunks = [c for c, _ in kept]
+        chunk_last_token_idx = [idx for _, idx in kept]
 
-        # Distribute timestamps proportionally by character count.
-        # Guarantee each chunk has end > start (min 0.05 s per chunk).
+        # Compute provisional chunk end times by character-length proportion.
+        # These are then snapped to ASR word boundaries below (if available).
         MIN_DUR = 0.05
         total_chars = sum(len(c) for c in chunks)
         n_chunks = len(chunks)
-        # Compute raw proportional durations
         raw_durs = [
             duration * (len(c) / total_chars if total_chars > 0 else 1 / n_chunks)
             for c in chunks
         ]
-        # Clamp each to MIN_DUR; if total would exceed duration, scale down
         clamped = [max(d, MIN_DUR) for d in raw_durs]
         total_clamped = sum(clamped)
         if total_clamped > duration and duration > 0:
             scale = duration / total_clamped
             clamped = [d * scale for d in clamped]
+        raw_ends: List[float] = []
         t = start
-        for i, (chunk, dur) in enumerate(zip(chunks, clamped)):
-            chunk_end = t + dur
-            # Last chunk snaps to original end to avoid float drift
+        for i, dur in enumerate(clamped):
+            t = t + dur
             if i == n_chunks - 1:
-                chunk_end = end
-            # Final safety: ensure end > start
-            if chunk_end <= t:
-                chunk_end = t + MIN_DUR
+                raw_ends.append(end)
+            else:
+                raw_ends.append(t)
+
+        # For EN, if ASR words count matches token count we can do an exact
+        # token-index → word-index mapping (no nearest-distance ambiguity).
+        seg_words = seg.get('words') or []
+        chunk_end_word_indices: Optional[List[int]] = None
+        if (not is_zh) and seg_words and len(seg_words) == len(tokens):
+            chunk_end_word_indices = list(chunk_last_token_idx)
+
+        intervals = _snap_chunk_intervals_to_word_boundaries(
+            chunks=chunks,
+            raw_ends=raw_ends,
+            seg_start=start,
+            seg_end=end,
+            words=seg_words,
+            min_dur=MIN_DUR,
+            chunk_end_word_indices=chunk_end_word_indices,
+        )
+
+        for chunk, (cs, ce) in zip(chunks, intervals):
+            if ce <= cs:
+                ce = cs + MIN_DUR
             new_seg = dict(seg)  # preserve any extra keys
             new_seg['text'] = chunk
-            new_seg['start'] = round(t, 3)
-            new_seg['end'] = round(chunk_end, 3)
+            new_seg['start'] = round(cs, 3)
+            new_seg['end'] = round(ce, 3)
             result.append(new_seg)
-            t = chunk_end
 
     return result
 

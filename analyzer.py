@@ -141,9 +141,10 @@ class Analyzer:
         """Build the cache key prefix for one ASR engine."""
         cache_md5_source = cache_source_path or audio_path
         source_md5 = self._get_file_md5(cache_md5_source)
+        profile = getattr(self.config, "asr_audio_extraction_profile", "linear")
         if engine_prefix:
-            return f"{engine_prefix}_{source_md5}_{model}_{language}"
-        return f"{source_md5}_{model}_{language}"
+            return f"{engine_prefix}_{source_md5}_{model}_{language}_{profile}"
+        return f"{source_md5}_{model}_{language}_{profile}"
 
     def _build_asr_chunk_cache_file(self, cache_key_prefix: str, chunk_idx: int) -> Path:
         """Return the cache file path for a specific ASR chunk."""
@@ -592,6 +593,12 @@ class Analyzer:
                 "-i",
                 video_path,
                 "-vn",  # No video
+                # Keep audio timeline aligned with video PTS when the source
+                # has gap-encoded silence (e.g. one AAC frame claiming 48s).
+                # Without this, decoded PCM is shorter than the container and
+                # ASR/subtitle timestamps drift after the gap.
+                "-af",
+                "aresample=async=1:first_pts=0",
                 "-acodec",
                 "pcm_s16le",  # PCM 16-bit
                 "-ar",
@@ -1484,7 +1491,113 @@ class Analyzer:
 
             deduped.append(current)
 
-        return deduped
+        return self._resolve_overlapping_segments(deduped)
+
+    def _resolve_overlapping_segments(self, segments: list) -> list:
+        """
+        Resolve adjacent-segment time overlaps caused by ASR chunk-boundary
+        duplication (e.g. one phrase transcribed twice across a chunk overlap).
+
+        Applied AFTER `_merge_asr_segments` already removed identical / near-
+        identical (sim >= 0.97) duplicates. The remaining overlaps are
+        moderate-similarity pairs that would otherwise be burned simultaneously
+        and produce on-screen "ghost" subtitle stacking.
+
+        Rules, per adjacent pair where prev.end > cur.start:
+          1. Substring dedup — if one normalized text is a proper substring of
+             the other, drop the shorter (substring) segment.
+          2. High-similarity merge — if time overlap covers >= 80% of the
+             shorter segment and text similarity >= 0.85, keep only the
+             longer-duration segment (it covers strictly more content).
+          3. Boundary trim — fallback for distinct but slightly overlapping
+             segments: truncate prev.end to cur.start (preserves both texts
+             but eliminates the simultaneous-display window).
+        """
+        if not segments or len(segments) < 2:
+            return list(segments)
+
+        def _norm(text: str) -> str:
+            return re.sub(r"[\s\W_]+", "", (text or "").lower(), flags=re.UNICODE)
+
+        result: list = [dict(segments[0])]
+        for seg in segments[1:]:
+            cur = dict(seg)
+            prev = result[-1]
+
+            ps = float(prev.get("start", 0.0))
+            pe = float(prev.get("end", 0.0))
+            cs = float(cur.get("start", 0.0))
+            ce = float(cur.get("end", 0.0))
+
+            if cs >= pe:
+                result.append(cur)
+                continue
+
+            prev_norm = _norm(str(prev.get("text", "")))
+            cur_norm = _norm(str(cur.get("text", "")))
+
+            # Rule 1: substring dedup
+            if (
+                cur_norm
+                and prev_norm
+                and cur_norm != prev_norm
+                and cur_norm in prev_norm
+            ):
+                logging.debug(
+                    "[ASR overlap] drop substring cur=%.2f-%.2f '%s' ⊂ prev=%.2f-%.2f '%s'",
+                    cs, ce, str(cur.get("text", ""))[:40],
+                    ps, pe, str(prev.get("text", ""))[:40],
+                )
+                continue
+            if (
+                prev_norm
+                and cur_norm
+                and prev_norm != cur_norm
+                and prev_norm in cur_norm
+            ):
+                logging.debug(
+                    "[ASR overlap] replace prev=%.2f-%.2f '%s' ⊂ cur=%.2f-%.2f '%s'",
+                    ps, pe, str(prev.get("text", ""))[:40],
+                    cs, ce, str(cur.get("text", ""))[:40],
+                )
+                result[-1] = cur
+                continue
+
+            # Rule 2: high-similarity overlap → keep longer-duration one
+            overlap = min(pe, ce) - max(ps, cs)
+            prev_dur = max(0.0, pe - ps)
+            cur_dur = max(0.0, ce - cs)
+            shorter_dur = min(prev_dur, cur_dur)
+            sim = (
+                SequenceMatcher(None, prev_norm, cur_norm).ratio()
+                if prev_norm and cur_norm
+                else 0.0
+            )
+            if (
+                shorter_dur > 0
+                and overlap >= shorter_dur * 0.8
+                and sim >= 0.85
+            ):
+                logging.debug(
+                    "[ASR overlap] merge high-sim pair sim=%.3f overlap=%.2fs: keep %s",
+                    sim, overlap, "cur" if cur_dur > prev_dur else "prev",
+                )
+                if cur_dur > prev_dur:
+                    result[-1] = cur
+                continue
+
+            # Rule 3: boundary trim — truncate prev.end to cur.start
+            new_pe = max(ps + 0.05, cs)
+            trimmed = dict(prev)
+            trimmed["end"] = round(new_pe, 3)
+            logging.debug(
+                "[ASR overlap] trim prev.end %.3f→%.3f to avoid overlap with cur=%.3f",
+                pe, new_pe, cs,
+            )
+            result[-1] = trimmed
+            result.append(cur)
+
+        return result
 
     @staticmethod
     def _normalize_cached_asr_segments(

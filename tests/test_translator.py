@@ -10,6 +10,7 @@ from unittest.mock import patch
 from translator import (
     Translator,
     _extract_json_array_payload,
+    _snap_chunk_intervals_to_word_boundaries,
     _split_long_segments,
     _translation_has_language_drift,
     _translation_has_meta_output,
@@ -94,6 +95,129 @@ class TestSplitLongSegments:
         # At least one chunk should end with punctuation
         ends_with_punct = any(seg['text'].rstrip()[-1] in '.!?,;' for seg in result if seg['text'].rstrip())
         assert ends_with_punct
+
+    def test_split_with_words_snaps_to_word_boundary(self):
+        """Real 0:03-0:12 opening case: split point must land on a word.end,
+        not in the silent gap between 'coming.' (7.44s) and 'My' (9.72s)."""
+        seg = {
+            'start': 3.20,
+            'end': 12.30,
+            'text': "Hello. Hey everyone. How's it going? Thanks for coming. My name is Mahesh and I'm a product",
+            'words': [
+                {'word': 'Hello.', 'start': 3.20, 'end': 3.76},
+                {'word': 'Hey', 'start': 3.76, 'end': 4.32},
+                {'word': 'everyone.', 'start': 4.32, 'end': 4.62},
+                {'word': "How's", 'start': 4.88, 'end': 5.12},
+                {'word': 'it', 'start': 5.12, 'end': 5.22},
+                {'word': 'going?', 'start': 5.22, 'end': 5.40},
+                {'word': 'Thanks', 'start': 6.64, 'end': 6.88},
+                {'word': 'for', 'start': 6.88, 'end': 7.10},
+                {'word': 'coming.', 'start': 7.10, 'end': 7.44},
+                {'word': 'My', 'start': 9.72, 'end': 10.08},
+                {'word': 'name', 'start': 10.08, 'end': 10.26},
+                {'word': 'is', 'start': 10.26, 'end': 10.46},
+                {'word': 'Mahesh', 'start': 10.46, 'end': 10.88},
+                {'word': 'and', 'start': 10.88, 'end': 11.54},
+                {'word': "I'm", 'start': 11.54, 'end': 11.88},
+                {'word': 'a', 'start': 11.88, 'end': 12.08},
+                {'word': 'product', 'start': 12.08, 'end': 12.30},
+            ],
+        }
+        # Use the same horizontal-video budget the production pipeline uses
+        # so the segment splits into the same 2 chunks the user observed.
+        result = _split_long_segments([seg], max_en_chars=65, max_zh_chars=45, lang='en')
+        assert len(result) == 2, f"expected 2 chunks (production split), got {len(result)}"
+
+        # Every split end must equal some word.end (within rounding)
+        word_ends = {round(w['end'], 3) for w in seg['words']}
+        word_ends.add(round(seg['end'], 3))
+        for r in result:
+            assert round(r['end'], 3) in word_ends, (
+                f"end={r['end']} did not snap to any word boundary {sorted(word_ends)}"
+            )
+        # First chunk text ends with 'coming.' → its end must snap to 'coming.' (7.44),
+        # NOT into the silent gap 7.44-9.72 (old buggy behaviour was 8.76).
+        assert abs(result[0]['end'] - 7.44) < 0.01, (
+            f"first chunk end should snap to 'coming.' (7.44), got {result[0]['end']}"
+        )
+        # Second chunk start follows the first chunk end and must not fall before
+        # the next spoken word ('My' starts at 9.72).
+        assert result[1]['start'] == result[0]['end']
+
+    def test_split_without_words_falls_back_to_proportional(self):
+        """No `words` field → behavior identical to old character-proportional split."""
+        text = 'This is a really long sentence that definitely exceeds forty two characters in length.'
+        segs = [{'start': 0.0, 'end': 4.0, 'text': text}]
+        result = _split_long_segments(segs, max_en_chars=42, max_zh_chars=22, lang='en')
+        assert abs(result[0]['start'] - 0.0) < 0.001
+        assert abs(result[-1]['end'] - 4.0) < 0.001
+        # monotonic timestamps
+        for i in range(len(result) - 1):
+            assert result[i]['end'] <= result[i + 1]['start'] + 0.001
+
+    def test_split_preserves_words_field_for_downstream(self):
+        """The `words` field should remain on every split chunk (downstream uses it)."""
+        seg = {
+            'start': 0.0,
+            'end': 4.0,
+            'text': 'short clause. another short clause here.',
+            'words': [
+                {'word': 'short', 'start': 0.0, 'end': 0.4},
+                {'word': 'clause.', 'start': 0.4, 'end': 1.0},
+                {'word': 'another', 'start': 1.5, 'end': 2.0},
+                {'word': 'short', 'start': 2.0, 'end': 2.4},
+                {'word': 'clause', 'start': 2.4, 'end': 3.0},
+                {'word': 'here.', 'start': 3.0, 'end': 4.0},
+            ],
+        }
+        result = _split_long_segments([seg], max_en_chars=20, max_zh_chars=22, lang='en')
+        for r in result:
+            assert 'words' in r
+
+
+class TestSnapChunkIntervalsToWordBoundaries:
+    """Unit tests for _snap_chunk_intervals_to_word_boundaries helper."""
+
+    def test_snaps_to_nearest_word_end(self):
+        words = [
+            {'word': 'a', 'start': 0.0, 'end': 1.0},
+            {'word': 'b', 'start': 1.0, 'end': 2.0},
+            {'word': 'c', 'start': 2.0, 'end': 3.0},
+            {'word': 'd', 'start': 3.0, 'end': 4.0},
+        ]
+        # Raw split says first chunk ends at 1.8 → should snap to 2.0 (word b)
+        intervals = _snap_chunk_intervals_to_word_boundaries(
+            chunks=['a b', 'c d'],
+            raw_ends=[1.8, 4.0],
+            seg_start=0.0,
+            seg_end=4.0,
+            words=words,
+        )
+        assert intervals[0] == (0.0, 2.0)
+        assert intervals[1] == (2.0, 4.0)
+
+    def test_no_words_uses_raw(self):
+        intervals = _snap_chunk_intervals_to_word_boundaries(
+            chunks=['a', 'b'],
+            raw_ends=[1.5, 3.0],
+            seg_start=0.0,
+            seg_end=3.0,
+            words=[],
+        )
+        assert intervals == [(0.0, 1.5), (1.5, 3.0)]
+
+    def test_monotonic_no_overlap_when_snapping(self):
+        words = [{'word': str(i), 'start': i, 'end': i + 0.5} for i in range(10)]
+        intervals = _snap_chunk_intervals_to_word_boundaries(
+            chunks=['0 1', '2 3', '4 5', '6 7', '8 9'],
+            raw_ends=[2.0, 4.0, 6.0, 8.0, 9.5],
+            seg_start=0.0,
+            seg_end=9.5,
+            words=words,
+        )
+        for i in range(len(intervals) - 1):
+            assert intervals[i][1] <= intervals[i + 1][0] + 1e-6
+        assert intervals[-1][1] == 9.5
 
 
 class TestTranslatorFunctionality:

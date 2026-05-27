@@ -1934,16 +1934,29 @@ def embed_subtitles_batch(clips_dir: str, subtitles_dir: str, output_dir: str,
             output_file = f"{video_basename}_bilingual.mp4"
             output_path = os.path.join(output_dir, output_file)
 
+            # Prefer zh_aligned.srt for burn so ZH timestamps share the EN
+            # split timeline exactly — avoids per-ZH second split that drifts
+            # away from real word boundaries.
+            zh_burn_srt_path = zh_srt_path
+            zh_burn_source = "zh"
+            if zh_aligned_srt_path and os.path.exists(zh_aligned_srt_path):
+                zh_burn_srt_path = zh_aligned_srt_path
+                zh_burn_source = "zh_aligned"
+
             logging.info(f"  EN: {os.path.basename(en_srt_path) if os.path.exists(en_srt_path) else '(none)'}")
-            logging.info(f"  ZH: {os.path.basename(zh_srt_path) if os.path.exists(zh_srt_path) else '(none)'}")
+            logging.info(
+                f"  ZH: {os.path.basename(zh_burn_srt_path) if os.path.exists(zh_burn_srt_path) else '(none)'} "
+                f"(source={zh_burn_source})"
+            )
             logging.info(f"  Output: {output_file}")
 
             burn_decision: Dict[str, Any] = {}
-            success = _hard_burn_bilingual_auto(video_path, en_srt_path, zh_srt_path, output_path,
+            success = _hard_burn_bilingual_auto(video_path, en_srt_path, zh_burn_srt_path, output_path,
                                                 subtitle_status=subtitle_status,
                                                 asr_segments=clip_asr,
                                                 zh_aligned_srt_path=zh_aligned_srt_path,
                                                 decision_meta=burn_decision)
+            burn_decision["zh_subtitle_source"] = zh_burn_source
             clip_info["subtitle_burn"] = burn_decision
             logging.info("  Burn decision: %s", json.dumps(burn_decision, ensure_ascii=False))
         else:

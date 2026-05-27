@@ -193,6 +193,13 @@ class Config:
     )
     """缓存目录（相对项目根）"""
 
+    asr_audio_extraction_profile: str = field(
+        default_factory=lambda: os.environ.get(
+            "ASR_AUDIO_EXTRACTION_PROFILE", "aresample_async_v1"
+        )
+    )
+    """音频提取配置标识；变更 ffmpeg 提取参数时需 bump，避免 ASR 缓存复用错误时间轴"""
+
     asr_vad_filter: bool = field(
         default_factory=lambda: os.environ.get("ASR_VAD_FILTER", "true").lower() == "true"
     )

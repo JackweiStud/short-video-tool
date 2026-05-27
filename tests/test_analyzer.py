@@ -153,6 +153,84 @@ class TestAnalyzerFunctionality:
         assert merged[0]["text"] == "you need to think through all these things, not just the product."
         assert merged[1]["text"] == "If it were."
 
+    def test_merge_asr_segments_resolves_chunk_boundary_overlap_substring(self):
+        """Real 9:52 case from output/: substring duplicate must be dropped."""
+        analyzer = Analyzer()
+        segments = [
+            {
+                "start": 589.080,
+                "end": 590.740,
+                "text": "We also saw a bunch of limitations.",
+            },
+            {
+                "start": 590.000,
+                "end": 590.760,
+                "text": "bunch of limitations.",
+            },
+        ]
+
+        merged = analyzer._merge_asr_segments(segments)
+
+        assert len(merged) == 1
+        assert merged[0]["text"] == "We also saw a bunch of limitations."
+        for i in range(len(merged) - 1):
+            assert merged[i]["end"] <= merged[i + 1]["start"] + 1e-6
+
+    def test_merge_asr_segments_resolves_chunk_boundary_overlap_high_sim(self):
+        """Real 9:52 case from output/: high-similarity overlap keeps longer."""
+        analyzer = Analyzer()
+        segments = [
+            {
+                "start": 591.480,
+                "end": 594.980,
+                "text": "We saw cases where memory was, sessions were kind of missed.",
+            },
+            {
+                "start": 591.500,
+                "end": 595.220,
+                "text": "We saw cases where memory was, sessions were kind of missing",
+            },
+        ]
+
+        merged = analyzer._merge_asr_segments(segments)
+
+        assert len(merged) == 1
+        assert merged[0]["end"] == 595.220
+        assert "missing" in merged[0]["text"]
+
+    def test_resolve_overlapping_segments_boundary_trim(self):
+        """Distinct texts with mild overlap → prev.end truncated to cur.start."""
+        analyzer = Analyzer()
+        segments = [
+            {"start": 10.0, "end": 12.5, "text": "Hello there friend."},
+            {"start": 12.0, "end": 14.0, "text": "Different sentence entirely."},
+        ]
+
+        resolved = analyzer._resolve_overlapping_segments(segments)
+
+        assert len(resolved) == 2
+        assert resolved[0]["end"] == 12.0
+        assert resolved[1]["start"] == 12.0
+        for i in range(len(resolved) - 1):
+            assert resolved[i]["end"] <= resolved[i + 1]["start"] + 1e-6
+
+    def test_resolve_overlapping_segments_non_overlap_unchanged(self):
+        """Non-overlapping segments must pass through unchanged."""
+        analyzer = Analyzer()
+        segments = [
+            {"start": 0.0, "end": 2.0, "text": "First."},
+            {"start": 2.5, "end": 4.0, "text": "Second."},
+            {"start": 5.0, "end": 7.0, "text": "Third."},
+        ]
+
+        resolved = analyzer._resolve_overlapping_segments(segments)
+
+        assert len(resolved) == 3
+        for orig, got in zip(segments, resolved):
+            assert orig["start"] == got["start"]
+            assert orig["end"] == got["end"]
+            assert orig["text"] == got["text"]
+
     def test_resolve_asr_initial_prompt_only_for_zh(self):
         analyzer = Analyzer()
         analyzer.config.asr_initial_prompt_enabled = True

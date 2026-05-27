@@ -143,13 +143,14 @@ def test_downloader_uses_configurable_ytdlp_settings(monkeypatch, temp_dir):
 def test_analyzer_uses_config_for_ffmpeg_timeout(monkeypatch, temp_dir):
     cfg = StubConfig(temp_dir)
     analyzer = Analyzer(config=cfg)
-    observed = {"timeout": None}
+    observed = {"timeout": None, "cmd": None}
 
     def fake_run(cmd, stdout=None, stderr=None, text=None, timeout=None):
         if cmd[:2] == ["ffmpeg", "-version"]:
             return subprocess.CompletedProcess(cmd, 0, "", "")
 
         observed["timeout"] = timeout
+        observed["cmd"] = cmd
         output_audio_path = cmd[-1]
         with open(output_audio_path, "wb") as f:
             f.write(b"fake-audio")
@@ -160,6 +161,8 @@ def test_analyzer_uses_config_for_ffmpeg_timeout(monkeypatch, temp_dir):
     audio_path = analyzer._extract_audio("dummy_input.mp4", temp_dir)
     assert audio_path is not None
     assert observed["timeout"] == cfg.ffmpeg_timeout
+    assert "-af" in observed["cmd"]
+    assert "aresample=async=1:first_pts=0" in observed["cmd"]
 
 
 def test_analyzer_topic_segmentation_uses_llm_and_normalizes_segments(monkeypatch, temp_dir):
