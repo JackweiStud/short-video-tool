@@ -109,9 +109,10 @@ class TestEndToEndPipeline:
         with patch('os.listdir', return_value=['Test Video.mp4']):
             with patch('os.path.exists', return_value=True):
                 with patch('os.path.getsize', return_value=18000):
-                    download_result = downloader.download_video(
-                        url="https://youtube.com/watch?v=test123"
-                    )
+                    with patch('os.rename'):
+                        download_result = downloader.download_video(
+                            url="https://youtube.com/watch?v=test123"
+                        )
         
         # Verify download result structure
         assert download_result is not None

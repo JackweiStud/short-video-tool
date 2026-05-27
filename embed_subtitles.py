@@ -13,7 +13,6 @@ Usage:
 """
 
 import argparse
-import copy
 import logging
 import os
 import re
@@ -76,6 +75,38 @@ def _build_visual_synced_subtitle_track(
     Returns the generated SRT path on success, otherwise None.
     """
     if not asr_segments:
+        return None
+
+    try:
+        from subtitle_sync import SubtitleSync
+        from translator import Translator
+
+        logging.info(
+            "[Hard-sub main path] Building visual-synced %s subtitle track via SubtitleSync...",
+            target_lang,
+        )
+        syncer = SubtitleSync(sample_fps=5.0)
+        aligned_segments = syncer.get_aligned_segments(video_path, asr_segments)
+        if not aligned_segments:
+            logging.warning("[Hard-sub main path] SubtitleSync returned no aligned segments.")
+            return None
+
+        translator = Translator(config=get_config())
+        translated_segments = translator._translate_segments(aligned_segments, target_lang=target_lang)
+        translator._generate_srt(translated_segments, output_srt_path)
+        logging.info(
+            "[Hard-sub main path] Generated visual-synced %s subtitle track: %s (%d segments)",
+            target_lang,
+            os.path.basename(output_srt_path),
+            len(translated_segments),
+        )
+        return output_srt_path
+    except Exception as e:
+        logging.warning(
+            "[Hard-sub main path] Failed to build visual-synced %s subtitle track: %s",
+            target_lang,
+            e,
+        )
         return None
 
 
@@ -258,70 +289,74 @@ def _format_hard_subtitle_policy(policy: Dict[str, str]) -> str:
     )
 
 
-def _compute_mask_text_positions(
-    *,
-    mask_x: int,
-    mask_y: int,
-    mask_w: int,
-    mask_h: int,
-    video_h: int,
-    en_fontsize: int,
-    zh_fontsize: int,
-    inter_gap: int,
-) -> Dict[str, int]:
+def _get_bilingual_burn_style(hard_subtitle_mask: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
-    Compute absolute subtitle anchor positions inside the hard-subtitle mask card.
+    Palette for bilingual hard-burn.
 
-    The returned y coordinates are ASS \\an2 bottom-center anchors, which is also
-    close enough for the moviepy fallback text layout.
+    - With placement region (replace existing hard subs): opaque slate card, yellow EN, white ZH.
+    - Without (none): clean dual palette from _get_clean_dual_subtitle_style().
     """
-    center_x = mask_x + mask_w // 2
-    inner_pad_y = max(8, round(min(mask_h * 0.12, video_h * 0.012)))
-    zh_bottom = mask_y + mask_h - inner_pad_y
-    en_bottom = zh_bottom - zh_fontsize - inter_gap
-
-    min_en_bottom = mask_y + inner_pad_y + en_fontsize
-    if en_bottom < min_en_bottom:
-        en_bottom = min_en_bottom
-
+    if hard_subtitle_mask:
+        return {
+            "card_colour": "&H2A170F&",
+            "card_alpha": "&H00&",
+            "card_rgba": (15, 23, 42, 255),
+            "color_en_ass": "&H00D7FF&",
+            "color_zh_ass": "&HFFFFFF&",
+            "color_en_rgba": (255, 215, 0, 255),
+            "color_zh_rgba": (255, 255, 255, 255),
+        }
+    clean = _get_clean_dual_subtitle_style()
     return {
-        "center_x": center_x,
-        "en_bottom": en_bottom,
-        "zh_bottom": zh_bottom,
-        "inner_pad_y": inner_pad_y,
+        "card_colour": clean["en"]["back_ass"],
+        "card_alpha": "&H4C&",
+        "card_rgba": clean["en"]["background_rgba"],
+        "color_en_ass": clean["en"]["primary_ass"],
+        "color_zh_ass": clean["zh"]["primary_ass"],
+        "color_en_rgba": clean["en"]["primary_rgba"],
+        "color_zh_rgba": clean["zh"]["primary_rgba"],
     }
 
-    try:
-        from subtitle_sync import SubtitleSync
-        from translator import Translator
 
-        logging.info(
-            "[Hard-sub main path] Building visual-synced %s subtitle track via SubtitleSync...",
-            target_lang,
-        )
-        syncer = SubtitleSync(sample_fps=5.0)
-        aligned_segments = syncer.get_aligned_segments(video_path, asr_segments)
-        if not aligned_segments:
-            logging.warning("[Hard-sub main path] SubtitleSync returned no aligned segments.")
-            return None
+def _compute_bilingual_card_geometry(
+    *,
+    frame_width: int,
+    frame_height: int,
+    content_w: int,
+    content_h: int,
+    pad_x: int,
+    pad_y: int,
+    margin_v: int,
+    hard_subtitle_mask: Optional[Dict[str, Any]] = None,
+) -> Dict[str, int]:
+    """Shared card size/position for ASS and moviepy bilingual burn."""
+    card_w = content_w + pad_x * 2
+    card_h = content_h + pad_y * 2
+    if hard_subtitle_mask:
+        mask_w = int(hard_subtitle_mask["w"])
+        mask_h = int(hard_subtitle_mask["h"])
+        card_w = max(card_w, mask_w)
+        card_h = max(card_h, mask_h)
 
-        translator = Translator(config=get_config())
-        translated_segments = translator._translate_segments(aligned_segments, target_lang=target_lang)
-        translator._generate_srt(translated_segments, output_srt_path)
-        logging.info(
-            "[Hard-sub main path] Generated visual-synced %s subtitle track: %s (%d segments)",
-            target_lang,
-            os.path.basename(output_srt_path),
-            len(translated_segments),
-        )
-        return output_srt_path
-    except Exception as e:
-        logging.warning(
-            "[Hard-sub main path] Failed to build visual-synced %s subtitle track: %s",
-            target_lang,
-            e,
-        )
-        return None
+    card_x = (frame_width - card_w) // 2
+    card_y = frame_height - margin_v - card_h
+    if hard_subtitle_mask:
+        mask_y = int(hard_subtitle_mask["y"])
+        mask_h = int(hard_subtitle_mask["h"])
+        mask_center_y = mask_y + mask_h // 2
+        card_y = mask_center_y - card_h // 2
+    card_y = max(10, card_y)
+
+    text_top = card_y + (card_h - content_h) // 2
+    return {
+        "card_x": card_x,
+        "card_y": card_y,
+        "card_w": card_w,
+        "card_h": card_h,
+        "text_top": text_top,
+        "text_y_anchor": card_y + (card_h + content_h) // 2,
+    }
+
 
 def _get_video_dimensions(video_path: str) -> Optional[Dict]:
     """
@@ -388,49 +423,6 @@ def _escape_drawtext(text: str) -> str:
     return text
 
 
-def _parse_ffmpeg_color_to_rgba(color: str) -> tuple[int, int, int, int]:
-    """Parse a small subset of ffmpeg color strings into RGBA."""
-    text = str(color or "").strip().lower()
-    alpha = 255
-
-    if "@" in text:
-        base, alpha_text = text.split("@", 1)
-        text = base.strip()
-        try:
-            alpha_value = float(alpha_text.strip())
-            alpha = int(round(alpha_value * 255)) if alpha_value <= 1 else int(round(alpha_value))
-        except Exception:
-            alpha = 255
-
-    named_colors = {
-        "black": (0, 0, 0),
-        "white": (255, 255, 255),
-        "red": (255, 0, 0),
-        "green": (0, 255, 0),
-        "blue": (0, 0, 255),
-        "yellow": (255, 255, 0),
-    }
-    if text in named_colors:
-        r, g, b = named_colors[text]
-    elif text.startswith("#") and len(text) in {4, 7}:
-        hex_text = text[1:]
-        if len(hex_text) == 3:
-            r, g, b = (int(ch * 2, 16) for ch in hex_text)
-        else:
-            r = int(hex_text[0:2], 16)
-            g = int(hex_text[2:4], 16)
-            b = int(hex_text[4:6], 16)
-    elif text.startswith("0x") and len(text) == 8:
-        hex_text = text[2:]
-        r = int(hex_text[0:2], 16)
-        g = int(hex_text[2:4], 16)
-        b = int(hex_text[4:6], 16)
-    else:
-        r, g, b = (0, 0, 0)
-
-    return r, g, b, max(0, min(255, alpha))
-
-
 def _get_clean_dual_subtitle_style() -> Dict[str, Dict[str, Any]]:
     """Return the default clean bilingual style for videos without source hard subtitles."""
     return {
@@ -449,41 +441,6 @@ def _get_clean_dual_subtitle_style() -> Dict[str, Dict[str, Any]]:
             "font_scale": 1.02,
         },
     }
-
-
-def _build_hard_subtitle_mask_overlay_image(
-    video_width: int,
-    video_height: int,
-    hard_subtitle_mask: Dict[str, Any],
-    color: str,
-) -> "Image.Image":
-    """Build a rounded, softly feathered overlay image for hard-subtitle masking."""
-    from PIL import Image, ImageDraw, ImageFilter
-
-    mask_x = int(hard_subtitle_mask["x"])
-    mask_y = int(hard_subtitle_mask["y"])
-    mask_w = int(hard_subtitle_mask["w"])
-    mask_h = int(hard_subtitle_mask["h"])
-    radius_px = int(hard_subtitle_mask.get("radius_px", 0))
-    feather_px = int(hard_subtitle_mask.get("feather_px", 0))
-
-    radius_px = max(4, min(radius_px, max(4, min(mask_w, mask_h) // 2 - 1)))
-    feather_px = max(0, feather_px)
-
-    overlay = Image.new("RGBA", (video_width, video_height), (0, 0, 0, 0))
-    alpha_mask = Image.new("L", (mask_w, mask_h), 0)
-    draw = ImageDraw.Draw(alpha_mask)
-    draw.rounded_rectangle(
-        (0, 0, mask_w - 1, mask_h - 1),
-        radius=radius_px,
-        fill=255,
-    )
-    if feather_px > 0:
-        alpha_mask = alpha_mask.filter(ImageFilter.GaussianBlur(radius=feather_px))
-
-    fill = Image.new("RGBA", (mask_w, mask_h), _parse_ffmpeg_color_to_rgba(color))
-    overlay.paste(fill, (mask_x, mask_y), alpha_mask)
-    return overlay
 
 
 # ──────────────────────────────────────────────
@@ -559,6 +516,32 @@ def _find_cjk_font(config: Config):
         if os.path.exists(f):
             return f
     return None
+
+
+def _get_font_family_name(font_path: str, default_family: str) -> str:
+    """Map a physical font file path to its font family name for ASS."""
+    if not font_path:
+        return default_family
+    
+    path_to_family = {
+        "/System/Library/Fonts/STHeiti Medium.ttc": "Heiti SC",
+        "/System/Library/Fonts/PingFang.ttc": "PingFang SC",
+        "/System/Library/Fonts/Hiragino Sans GB.ttc": "Hiragino Sans GB",
+        "/Library/Fonts/Arial Unicode.ttf": "Arial Unicode MS",
+        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf": "Arial Unicode MS",
+    }
+    
+    norm_path = os.path.normpath(font_path)
+    for path, family in path_to_family.items():
+        if os.path.normpath(path) == norm_path:
+            return family
+            
+    if os.path.isabs(font_path):
+        base = os.path.basename(font_path)
+        name, _ = os.path.splitext(base)
+        return name
+        
+    return font_path
 
 
 def _wrap_text_by_pixel(text: str, font, draw, max_width: int) -> str:
@@ -687,13 +670,7 @@ def _make_subtitle_frame(
     en_fontsize     = max(1, round(zh_fontsize * 0.80))
     margin_bottom   = layout["margin_v_zh"]
     inter_gap       = layout["inter_gap"]
-
-    # If we have a custom mask, position card dynamically within/above it
-    if hard_subtitle_mask:
-        mask_y = int(hard_subtitle_mask["y"])
-        mask_h = int(hard_subtitle_mask["h"])
-        mask_bottom_v = height - (mask_y + mask_h)
-        margin_bottom = max(1, mask_bottom_v + max(4, round(height * 0.005)))
+    burn_style = _get_bilingual_burn_style(hard_subtitle_mask)
 
     # Use Heiti SC/PingFang SC for Chinese font, and Arial for English font
     # If font_path is provided, prefer it for Chinese
@@ -738,33 +715,37 @@ def _make_subtitle_frame(
     content_w = max(en_w, zh_w)
     content_h = en_h + zh_h + (inter_gap if en_text and zh_text else 0)
 
-    card_w = content_w + pad_x * 2
-    card_h = content_h + pad_y * 2
+    geom = _compute_bilingual_card_geometry(
+        frame_width=width,
+        frame_height=height,
+        content_w=content_w,
+        content_h=content_h,
+        pad_x=pad_x,
+        pad_y=pad_y,
+        margin_v=margin_bottom,
+        hard_subtitle_mask=hard_subtitle_mask,
+    )
+    card_x = geom["card_x"]
+    card_y = geom["card_y"]
+    card_w = geom["card_w"]
+    card_h = geom["card_h"]
+    text_top = geom["text_top"]
 
-    card_x = (width - card_w) // 2
-    card_y = height - margin_bottom - card_h
-    card_y = max(10, card_y) # Avoid drawing off-screen at the top
-
-    # Card background: Slate 900 (#0F172A) with 70% opacity -> RGBA(15, 23, 42, 178)
-    card_bg_rgba = (15, 23, 42, 178)
     radius = max(8, round(card_h * 0.22))
     draw.rounded_rectangle(
         (card_x, card_y, card_x + card_w, card_y + card_h),
         radius=radius,
-        fill=card_bg_rgba,
+        fill=burn_style["card_rgba"],
     )
 
-    # Draw English text (top line, brighter slate-gray #E2E8F0)
     if en_text:
         en_x = (width - en_w) // 2
-        en_y = card_y + pad_y
-        draw.text((en_x, en_y), en_text, font=en_font, fill=(226, 232, 240, 255))
+        draw.text((en_x, text_top), en_text, font=en_font, fill=burn_style["color_en_rgba"])
 
-    # Draw Chinese text (bottom line, white)
     if zh_text:
         zh_x = (width - zh_w) // 2
-        zh_y = card_y + pad_y + en_h + (inter_gap if en_text else 0)
-        draw.text((zh_x, zh_y), zh_text, font=zh_font, fill=(255, 255, 255, 255))
+        zh_y = text_top + en_h + (inter_gap if en_text else 0)
+        draw.text((zh_x, zh_y), zh_text, font=zh_font, fill=burn_style["color_zh_rgba"])
 
     import numpy as np
     return np.array(img)
@@ -780,7 +761,7 @@ def _hard_burn_bilingual_auto(video_path: str, en_srt_path: str, zh_srt_path: st
     
     Strategies:
     - "none": Source has no subtitle → render dual (EN + ZH)
-    - "en" / "zh" / "bilingual": Source has hard subtitles → mask original subtitle band, then render unified dual subtitles
+    - "en" / "zh" / "bilingual": Source has hard subtitles → locate original subtitle region and cover with opaque bilingual card
     - "auto": Auto-detect and decide
     
     Args:
@@ -861,7 +842,8 @@ def _hard_burn_bilingual_auto(video_path: str, en_srt_path: str, zh_srt_path: st
             "w": mask_region["w"],
             "h": mask_region["h"],
             "padding_px": mask_region["padding_px"],
-            "color": config.subtitle_hard_mask_color,
+            "placement_only": True,
+            "legacy_mask_color_config": config.subtitle_hard_mask_color,
         }
 
     # Route to appropriate strategy
@@ -912,7 +894,7 @@ def _hard_burn_bilingual_auto(video_path: str, en_srt_path: str, zh_srt_path: st
     elif hard_burn_mode == "replace" and subtitle_status in {"en", "zh", "bilingual"}:
         boundary = detected_boundary if detected_boundary is not None else hard_boundary_fallback
         logging.info(
-            "Source has %s hard subtitle(s): masking original subtitle band and burning unified dual subtitles (boundary=%.4f, fallback=%s, mode=%s).",
+            "Source has %s hard subtitle(s): replacing original hard subtitles with unified dual card (boundary=%.4f, fallback=%s, mode=%s).",
             subtitle_status.upper(),
             boundary,
             detected_boundary is None,
@@ -944,7 +926,7 @@ def _hard_burn_bilingual_auto(video_path: str, en_srt_path: str, zh_srt_path: st
             hard_subtitle_mask=hard_sub_mask_meta,
         ):
             logging.warning(
-                "FFmpeg fast path failed for hard-sub replacement mode, falling back to moviepy dual overlay with mask."
+                "FFmpeg fast path failed for hard-sub replacement mode, falling back to moviepy opaque card overlay."
             )
             if decision_meta is not None:
                 decision_meta.update({
@@ -960,6 +942,7 @@ def _hard_burn_bilingual_auto(video_path: str, en_srt_path: str, zh_srt_path: st
                 zh_srt_path,
                 output_path,
                 hard_subtitle_mask=hard_sub_mask_meta,
+                subtitle_boundary=boundary,
             )
         return True
     else:
@@ -1371,15 +1354,11 @@ def _srts_to_bilingual_ass(
     margin_v = layout["margin_v_zh"]
     inter_gap = layout["inter_gap"]
 
-    # Adjust vertical margin if we have a mask card (replace hard subtitles mode)
-    if hard_subtitle_mask:
-        mask_y = int(hard_subtitle_mask["y"])
-        mask_h = int(hard_subtitle_mask["h"])
-        mask_bottom_v = play_res_y - (mask_y + mask_h)
-        margin_v = max(1, mask_bottom_v + max(4, round(play_res_y * 0.005)))
-
     font_zh = _find_cjk_font(config) or config.font_name_zh
     font_en = config.font_name_en
+
+    # Map physical font path to font family name for ASS compatibility
+    font_zh_family = _get_font_family_name(font_zh, config.font_name_zh)
 
     # Load fonts in PIL to measure exact text dimensions
     try:
@@ -1394,20 +1373,15 @@ def _srts_to_bilingual_ass(
     dummy_img = Image.new("RGBA", (1, 1))
     dummy_draw = ImageDraw.Draw(dummy_img)
 
-    # Card background: Slate 900 (#0F172A) with 70% opacity
-    # ASS hex color format: &H<BB><GG><RR>& (no alpha in the primary color code, alpha is separate)
-    card_colour = "&H2A170F&"
-    card_alpha = "&H4C&"  # 70% opacity -> 30% transparency -> 76/255 -> 4C in hex
-    
-    # Text colors
-    # Chinese (white): #FFFFFF -> &HFFFFFF&
-    # English (yellow): #FFD700 -> Blue=00, Green=D7, Red=FF -> &H00D7FF&
-    color_zh = "&HFFFFFF&"
-    color_en = "&H00D7FF&"
+    burn_style = _get_bilingual_burn_style(hard_subtitle_mask)
+    card_colour = burn_style["card_colour"]
+    card_alpha = burn_style["card_alpha"]
+    color_zh = burn_style["color_zh_ass"]
+    color_en = burn_style["color_en_ass"]
 
     # Style line: BorderStyle=1 (no box), Outline=0 (no border outline), Shadow=0
     style_line = (
-        f"{font_zh},{zh_fontsize},&H00FFFFFF&,&H000000FF&,&H00000000&,&H00000000&,"
+        f"{font_zh_family},{zh_fontsize},&H00FFFFFF&,&H000000FF&,&H00000000&,&H00000000&,"
         f"0,0,0,0,100,100,0,0,1,0,0,2,10,10,{margin_v},1"
     )
 
@@ -1443,12 +1417,20 @@ def _srts_to_bilingual_ass(
         content_w = max(en_w, zh_w)
         content_h = en_h + zh_h + (inter_gap if en_text and zh_text else 0)
 
-        card_w = content_w + pad_x * 2
-        card_h = content_h + pad_y * 2
-
-        card_x = (play_res_x - card_w) // 2
-        card_y = play_res_y - margin_v - card_h
-        card_y = max(10, card_y) # Avoid drawing off-screen at the top
+        geom = _compute_bilingual_card_geometry(
+            frame_width=play_res_x,
+            frame_height=play_res_y,
+            content_w=content_w,
+            content_h=content_h,
+            pad_x=pad_x,
+            pad_y=pad_y,
+            margin_v=margin_v,
+            hard_subtitle_mask=hard_subtitle_mask,
+        )
+        card_x = geom["card_x"]
+        card_y = geom["card_y"]
+        card_w = geom["card_w"]
+        card_h = geom["card_h"]
 
         # Rounded rectangle corners radius
         R = max(8, round(card_h * 0.22))
@@ -1474,11 +1456,11 @@ def _srts_to_bilingual_ass(
         events.append(bg_event)
 
         # Layer 1: Text event
-        text_y_anchor = card_y + card_h - pad_y
+        text_y_anchor = geom["text_y_anchor"]
         text = (
             f"{{\\an2\\pos({play_res_x // 2},{text_y_anchor})}}"
             f"{{\\q2\\fn{font_en}\\fs{en_fontsize}\\c{color_en}}}{en_text}\\N"
-            f"{{\\fn{font_zh}\\fs{zh_fontsize}\\c{color_zh}}}{zh_text}"
+            f"{{\\fn{font_zh_family}\\fs{zh_fontsize}\\c{color_zh}}}{zh_text}"
         )
         text_event = f"Dialogue: 1,{start},{end},Default,,0,0,0,,{text}"
         events.append(text_event)
@@ -1516,8 +1498,8 @@ def _hard_burn_bilingual_ffmpeg(video_path: str, en_srt_path: str, zh_srt_path: 
 
     Args:
         ocr_lang: Language detected by OCR in the source video ('en', 'zh', 'bilingual', or None).
-        hard_subtitle_mask: Optional solid bottom-band mask to hide existing hard subtitles
-                            before burning unified EN+ZH dual subtitles.
+        hard_subtitle_mask: Optional placement region (from OCR boundary) for centering the opaque
+                            bilingual ASS card over existing hard subtitles. Does not render a PNG mask.
     """
     config = get_config()
     video_dimensions = _get_video_dimensions(video_path)
@@ -1636,10 +1618,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             is_vertical_video,
             hard_subtitle_mask=hard_subtitle_mask,
         )
-        if hard_subtitle_mask:
-            vf = f"[0:v][1:v]overlay=0:0,ass={esc(bilingual_ass_path)}[v]"
-        else:
-            vf = f"ass={esc(bilingual_ass_path)}"
+        vf = f"ass={esc(bilingual_ass_path)}"
     else:
         # Single language fallbacks (when preserving source hard subtitles)
         zh_pos_override = None
@@ -1692,36 +1671,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         else:
             vf = en_filter
 
-    if hard_subtitle_mask:
-        mask_x = int(hard_subtitle_mask["x"])
-        mask_y = int(hard_subtitle_mask["y"])
-        mask_w = int(hard_subtitle_mask["w"])
-        mask_h = int(hard_subtitle_mask["h"])
-        mask_radius = int(hard_subtitle_mask.get("radius_px", 0))
-        mask_feather = int(hard_subtitle_mask.get("feather_px", 0))
-        mask_color = hard_subtitle_mask.get("color", config.subtitle_hard_mask_color)
-        overlay_image = _build_hard_subtitle_mask_overlay_image(
-            video_width=video_width,
-            video_height=video_height,
-            hard_subtitle_mask=hard_subtitle_mask,
-            color=mask_color,
-        )
-        import tempfile
-        overlay_tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-        overlay_path = overlay_tmp.name
-        overlay_tmp.close()
-        overlay_image.save(overlay_path)
-        logging.info(
-            "  Applying rounded hard-subtitle mask: x=%d y=%d w=%d h=%d radius=%d feather=%d color=%s.",
-            mask_x,
-            mask_y,
-            mask_w,
-            mask_h,
-            mask_radius,
-            mask_feather,
-            mask_color,
-        )
-
     # Use imageio_ffmpeg binary
     try:
         import imageio_ffmpeg
@@ -1729,27 +1678,14 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     except Exception:
         ffmpeg_exe = "ffmpeg"
 
-    if hard_subtitle_mask and overlay_path:
-        cmd = [
-            ffmpeg_exe, "-y",
-            "-i", video_path,
-            "-i", overlay_path,
-            "-filter_complex", vf,
-            "-map", "[v]",
-            "-map", "0:a?",
-            "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-            "-c:a", "copy",
-            output_path
-        ]
-    else:
-        cmd = [
-            ffmpeg_exe, "-y",
-            "-i", video_path,
-            "-vf", vf,
-            "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-            "-c:a", "copy",
-            output_path
-        ]
+    cmd = [
+        ffmpeg_exe, "-y",
+        "-i", video_path,
+        "-vf", vf,
+        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+        "-c:a", "copy",
+        output_path
+    ]
 
     try:
         result = subprocess.run(
@@ -1781,28 +1717,29 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 def _hard_burn_bilingual(video_path: str, en_srt_path: str, zh_srt_path: str,
                          output_path: str,
-                         hard_subtitle_mask: Optional[Dict[str, Any]] = None) -> bool:
+                         hard_subtitle_mask: Optional[Dict[str, Any]] = None,
+                         subtitle_boundary: float = 0.80) -> bool:
     """
     Hard-burn bilingual subtitles into video.
 
     Fast path: FFmpeg subtitles filter (seconds/minutes for long video).
     Fallback:  moviepy + Pillow frame rendering (slow, but no libass needed).
 
-    Layout:
-        ┌────────────────────────────────┐
-        │                                │
-        │          video frame           │
-        │                                │
-        │   English subtitle (line 1)    │  ← white
-        │   中文字幕 (line 2)            │  ← yellow
-        └────────────────────────────────┘
+    When hard_subtitle_mask is set, FFmpeg was already attempted by the caller; this
+    function goes straight to moviepy so placement parameters are not dropped.
     """
-    # ── Fast path: FFmpeg subtitles filter ──────────────────────────────
-    logging.info("  Trying FFmpeg subtitles filter (fast path)...")
-    if _hard_burn_bilingual_ffmpeg(video_path, en_srt_path, zh_srt_path, output_path):
-        return True
-
-    logging.warning("  FFmpeg subtitles filter failed (libass may be missing), falling back to moviepy")
+    if not hard_subtitle_mask:
+        logging.info("  Trying FFmpeg subtitles filter (fast path)...")
+        if _hard_burn_bilingual_ffmpeg(video_path, en_srt_path, zh_srt_path, output_path):
+            return True
+        logging.warning(
+            "  FFmpeg subtitles filter failed (libass may be missing), falling back to moviepy"
+        )
+    else:
+        logging.info(
+            "  Using moviepy fallback with hard-subtitle placement region (boundary=%.4f).",
+            subtitle_boundary,
+        )
 
     # ── Slow fallback: moviepy + Pillow ──────────────────────────────────
     try:
@@ -1831,36 +1768,7 @@ def _hard_burn_bilingual(video_path: str, en_srt_path: str, zh_srt_path: str,
         # Build bilingual subtitle pairs
         max_len = max(len(en_entries), len(zh_entries))
         subtitle_clips = []
-        if hard_subtitle_mask:
-            import numpy as np
-            mask_x = int(hard_subtitle_mask["x"])
-            mask_y = int(hard_subtitle_mask["y"])
-            mask_w = int(hard_subtitle_mask["w"])
-            mask_h = int(hard_subtitle_mask["h"])
-            mask_radius = int(hard_subtitle_mask.get("radius_px", 0))
-            mask_feather = int(hard_subtitle_mask.get("feather_px", 0))
-            logging.info(
-                "  Applying rounded hard-subtitle mask in moviepy fallback: x=%d y=%d w=%d h=%d radius=%d feather=%d.",
-                mask_x,
-                mask_y,
-                mask_w,
-                mask_h,
-                mask_radius,
-                mask_feather,
-            )
-            mask_color = hard_subtitle_mask.get("color", config.subtitle_hard_mask_color)
-            mask_img = _build_hard_subtitle_mask_overlay_image(
-                video_width=w,
-                video_height=h,
-                hard_subtitle_mask=hard_subtitle_mask,
-                color=mask_color,
-            )
-            mask_clip = (
-                ImageClip(np.array(mask_img), transparent=True)
-                .with_start(0)
-                .with_duration(video.duration)
-            )
-            subtitle_clips.append(mask_clip)
+
 
         video_dimensions = _get_video_dimensions(video_path)
         is_vertical_video = False

@@ -40,7 +40,7 @@ class TestTranslatorSiliconflow:
     """Test Siliconflow (DeepSeek) integration and fallbacks."""
     
     @patch('openai.OpenAI')
-    @patch.dict(os.environ, {"SILICONFLOW_API_KEY": "test-key"})
+    @patch.dict(os.environ, {"SILICONFLOW_API_KEY": "test-key", "LLM_MODEL": "deepseek-ai/DeepSeek-V3"})
     def test_siliconflow_initialization(self, mock_openai):
         """Translator should pick siliconflow if config points to it."""
         config = Config()
@@ -73,52 +73,32 @@ class TestDimensionScaling:
         assert style["en"]["background_rgba"] != style["zh"]["background_rgba"]
 
     def test_no_hard_subtitle_ffmpeg_ass_uses_clean_dual_background_style(self, temp_dir):
-        """FFmpeg fast path should write distinct text and background colors into ASS styles."""
-        video_path = os.path.join(temp_dir, "sample.mp4")
-        output_path = os.path.join(temp_dir, "out.mp4")
+        """None-mode ASS should use the clean dual palette and rounded vector card."""
         en_srt = os.path.join(temp_dir, "sample_en.srt")
         zh_srt = os.path.join(temp_dir, "sample_zh.srt")
-        for path, text in [(video_path, "fake"), (en_srt, "Hello"), (zh_srt, "你好")]:
+        for path, text in [(en_srt, "Hello"), (zh_srt, "你好")]:
             with open(path, "w", encoding="utf-8") as f:
-                if path.endswith(".srt"):
-                    f.write(f"1\n00:00:00,000 --> 00:00:01,000\n{text}\n\n")
-                else:
-                    f.write(text)
+                f.write(f"1\n00:00:00,000 --> 00:00:01,000\n{text}\n\n")
 
-        captured = {}
-
-        def fake_run(cmd, **kwargs):
-            captured["vf"] = cmd[cmd.index("-vf") + 1]
-            with open(output_path, "wb") as f:
-                f.write(b"fake output")
-            result = MagicMock()
-            result.returncode = 0
-            result.stderr = ""
-            return result
-
-        with patch("embed_subtitles._get_video_dimensions", return_value={"width": 1920, "height": 1080}):
-            with patch("embed_subtitles.subprocess.run", side_effect=fake_run):
-                ok = embed_subtitles._hard_burn_bilingual_ffmpeg(
-                    video_path,
-                    en_srt,
-                    zh_srt,
-                    output_path,
-                    ocr_lang=None,
-                    hard_subtitle_mask=None,
-                )
-
-        assert ok is True
-        ass_paths = [part.removeprefix("ass=") for part in captured["vf"].split(",")]
-        ass_contents = [open(path, encoding="utf-8").read() for path in ass_paths]
-        combined = "\n".join(ass_contents)
+        config = Config()
+        ass_path = embed_subtitles._srts_to_bilingual_ass(
+            en_srt,
+            zh_srt,
+            play_res_x=1920,
+            play_res_y=1080,
+            config=config,
+            is_vertical_video=False,
+            hard_subtitle_mask=None,
+        )
+        combined = open(ass_path, encoding="utf-8").read()
+        os.unlink(ass_path)
 
         assert "&H00FCFAF8&" in combined
         assert "&H008AE8FF&" in combined
         assert "&H292A170F&" in combined
-        assert "&H290C202D&" in combined
-        assert "Style: Default,Arial,56," in combined
-        assert "Style: Default,Heiti SC,60," in combined
-        assert ",0,0,3,8,0,2," in combined
+        assert "\\p1" in combined
+        assert " b " in combined
+        assert "&H4C&" in combined
     
     def test_font_size_scaling_on_vertical_video(self):
         """Font size in 9:16 (vertical) should be based on width (min dim)."""
@@ -149,31 +129,32 @@ class TestDimensionScaling:
         assert extra_lift <= 30
         assert layout["inter_gap"] <= 8
 
-    def test_hard_subtitle_mask_overlay_has_soft_rounded_edges(self):
-        """Mask overlay should render rounded corners with feathered alpha edges."""
-        mask = {
-            "x": 12,
-            "y": 24,
-            "w": 120,
-            "h": 48,
-            "radius_px": 12,
-            "feather_px": 2,
-        }
-        img = embed_subtitles._build_hard_subtitle_mask_overlay_image(
-            video_width=320,
-            video_height=180,
+    def test_hard_subtitle_ass_card_uses_rounded_vector_path(self, temp_dir):
+        """Replace-mode burn should draw opaque ASS card with bezier rounded corners."""
+        en_srt = os.path.join(temp_dir, "sample_en.srt")
+        zh_srt = os.path.join(temp_dir, "sample_zh.srt")
+        for path in [en_srt, zh_srt]:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("1\n00:00:00,000 --> 00:00:01,000\nsubtitle\n\n")
+
+        mask = {"x": 12, "y": 120, "w": 200, "h": 48}
+        config = Config()
+        ass_path = embed_subtitles._srts_to_bilingual_ass(
+            en_srt,
+            zh_srt,
+            play_res_x=320,
+            play_res_y=180,
+            config=config,
+            is_vertical_video=False,
             hard_subtitle_mask=mask,
-            color="black@0.95",
         )
-        arr = np.array(img)
+        ass_text = open(ass_path, encoding="utf-8").read()
+        os.unlink(ass_path)
 
-        center_alpha = arr[24 + 24, 12 + 60, 3]
-        corner_alpha = arr[24, 12, 3]
-        outside_alpha = arr[0, 0, 3]
-
-        assert center_alpha > 200
-        assert corner_alpha < center_alpha
-        assert outside_alpha == 0
+        assert "\\p1" in ass_text
+        assert " b " in ass_text
+        assert "\\1a&H00&" in ass_text
+        assert "&H00D7FF&" in ass_text
 
 class TestCLIPSelection:
     """Test precision mode for processing only current clips."""
@@ -239,8 +220,55 @@ class TestCLIPSelection:
         assert mock_burn.called
         args, kwargs = mock_burn.call_args
         assert args[1] == en_srt
-        assert args[2] == zh_srt
+        assert args[2] == zh_aligned_srt
         assert kwargs["subtitle_status"] == "en"
+
+    def test_hard_burn_bilingual_skips_ffmpeg_retry_when_mask_set(self, temp_dir):
+        """Wrapper must not retry FFmpeg without placement mask after replace-mode failure."""
+        video_path = os.path.join(temp_dir, "sample.mp4")
+        output_path = os.path.join(temp_dir, "out.mp4")
+        en_srt = os.path.join(temp_dir, "sample_en.srt")
+        zh_srt = os.path.join(temp_dir, "sample_zh.srt")
+        with open(video_path, "wb") as f:
+            f.write(b"fake")
+        for path in [en_srt, zh_srt]:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("1\n00:00:00,000 --> 00:00:01,000\nsubtitle\n\n")
+
+        mask = {"enabled": True, "x": 10, "y": 100, "w": 200, "h": 50}
+        subtitle_entry = [{"start": 0.0, "end": 1.0, "text": "subtitle"}]
+
+        with patch("embed_subtitles._hard_burn_bilingual_ffmpeg") as mock_ffmpeg:
+            with patch("embed_subtitles._parse_srt", return_value=subtitle_entry):
+                with patch(
+                    "embed_subtitles._make_subtitle_frame",
+                    return_value=np.zeros((180, 320, 4), dtype=np.uint8),
+                ):
+                    with patch("embed_subtitles._get_video_dimensions", return_value={"width": 320, "height": 180}):
+                        with patch("embed_subtitles._find_cjk_font", return_value=None):
+                            with patch("moviepy.VideoFileClip") as mock_video_clip:
+                                mock_video = MagicMock()
+                                mock_video.size = (320, 180)
+                                mock_video_clip.return_value = mock_video
+                                with patch("moviepy.ImageClip") as mock_image_clip:
+                                    mock_image_clip.return_value.with_start.return_value.with_duration.return_value = MagicMock()
+                                    with patch("moviepy.CompositeVideoClip") as mock_composite:
+                                        mock_final = MagicMock()
+                                        mock_composite.return_value = mock_final
+                                        with patch("embed_subtitles.os.path.exists", return_value=True):
+                                            with patch("embed_subtitles.os.path.getsize", return_value=128):
+                                                ok = embed_subtitles._hard_burn_bilingual(
+                                                    video_path,
+                                                    en_srt,
+                                                    zh_srt,
+                                                    output_path,
+                                                    hard_subtitle_mask=mask,
+                                                    subtitle_boundary=0.88,
+                                                )
+
+        assert not mock_ffmpeg.called
+        assert ok is True
+        mock_final.write_videofile.assert_called_once()
 
     def test_auto_en_hard_subtitle_masks_source_and_burns_dual(self, temp_dir):
         """Auto-detected EN hard subtitles should switch to masked dual-burn mode."""

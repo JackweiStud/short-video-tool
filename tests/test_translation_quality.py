@@ -47,7 +47,7 @@ TEST_SENTENCES = [
     "Please find attached the proposal for your review and consideration.",
 ]
 
-def test_model_quality(model_name: str, test_data: list):
+def run_model_quality(model_name: str, test_data: list):
     """测试指定模型的翻译质量"""
     print(f"\n{'='*70}")
     print(f"模型: {model_name}")
@@ -94,7 +94,7 @@ def main():
     all_results = {}
 
     for model in models:
-        results = test_model_quality(model, TEST_SENTENCES)
+        results = run_model_quality(model, TEST_SENTENCES)
         if results:
             all_results[model] = results
 

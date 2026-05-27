@@ -290,7 +290,7 @@ class TestTranslatorFunctionality:
                 if target_lang == "en":
                     new_seg["text"] = f"EN segment {idx}"
                 else:
-                    new_seg["text"] = "中文字幕需要保持和英文完全一致的时间轴。" + ("非常长" * 8 if idx == 0 else "")
+                    new_seg["text"] = "中文字幕需要保持和英文完全一致的时间轴。" + ("非常长" * 15 if idx == 0 else "")
                 translated.append(new_seg)
             return translated
 

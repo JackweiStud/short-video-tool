@@ -30,7 +30,7 @@ TEST_SENTENCES = [
     "Neural networks are inspired by the human brain.",
 ] * 10  # 重复10次，共100句
 
-def test_model_performance(model_name: str, test_data: list, workers: int = 6):
+def run_model_performance(model_name: str, test_data: list, workers: int = 6):
     """测试指定模型的翻译性能"""
     print(f"\n{'='*70}")
     print(f"测试模型: {model_name}")
@@ -102,7 +102,7 @@ def main():
     results = []
 
     for model in models:
-        result = test_model_performance(model, TEST_SENTENCES, workers=6)
+        result = run_model_performance(model, TEST_SENTENCES, workers=6)
         if result:
             results.append(result)
 
