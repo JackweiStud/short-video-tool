@@ -682,118 +682,89 @@ def _make_subtitle_frame(
     draw = ImageDraw.Draw(img)
 
     layout = _compute_subtitle_layout(height, is_vertical_video, config)
-    en_fontsize     = layout["en_fontsize"]
     zh_fontsize     = layout["zh_fontsize"]
-    margin_bottom_zh = layout["margin_v_zh"]
-    margin_bottom_en = layout["margin_v_en"]
-    inter_gap = layout["inter_gap"]
-    clean_style = _get_clean_dual_subtitle_style() if not hard_subtitle_mask else None
-    if clean_style:
-        en_fontsize = max(1, round(en_fontsize * clean_style["en"]["font_scale"]))
-        zh_fontsize = max(1, round(zh_fontsize * clean_style["zh"]["font_scale"]))
-        margin_bottom_en = margin_bottom_zh + zh_fontsize + inter_gap
+    # Scale English font size to 80% of Chinese font size
+    en_fontsize     = max(1, round(zh_fontsize * 0.80))
+    margin_bottom   = layout["margin_v_zh"]
+    inter_gap       = layout["inter_gap"]
+
+    # If we have a custom mask, position card dynamically within/above it
+    if hard_subtitle_mask:
+        mask_y = int(hard_subtitle_mask["y"])
+        mask_h = int(hard_subtitle_mask["h"])
+        mask_bottom_v = height - (mask_y + mask_h)
+        margin_bottom = max(1, mask_bottom_v + max(4, round(height * 0.005)))
+
+    # Use Heiti SC/PingFang SC for Chinese font, and Arial for English font
+    # If font_path is provided, prefer it for Chinese
+    zh_font_name = font_path or _find_cjk_font(config) or config.font_name_zh
+    en_font_name = config.font_name_en
 
     try:
-        en_font = ImageFont.truetype(config.font_name_en, en_fontsize) if config.font_name_en else ImageFont.load_default()
-        zh_font = ImageFont.truetype(config.font_name_zh, zh_fontsize) if config.font_name_zh else ImageFont.load_default()
+        en_font = ImageFont.truetype(en_font_name, en_fontsize) if en_font_name else ImageFont.load_default()
+        zh_font = ImageFont.truetype(zh_font_name, zh_fontsize) if zh_font_name else ImageFont.load_default()
     except Exception:
         en_font = ImageFont.load_default()
         zh_font = ImageFont.load_default()
 
-    mask_positions = None
-    if hard_subtitle_mask:
-        mask_positions = _compute_mask_text_positions(
-            mask_x=int(hard_subtitle_mask["x"]),
-            mask_y=int(hard_subtitle_mask["y"]),
-            mask_w=int(hard_subtitle_mask["w"]),
-            mask_h=int(hard_subtitle_mask["h"]),
-            video_h=height,
-            en_fontsize=en_fontsize,
-            zh_fontsize=zh_fontsize,
-            inter_gap=inter_gap,
-        )
+    # Strip newlines and extra spaces to keep each on a single line
+    import re
+    en_text = re.sub(r'\s+', ' ', (en_text or "").replace('\n', ' ')).strip()
+    zh_text = re.sub(r'\s+', ' ', (zh_text or "").replace('\n', ' ')).strip()
 
-    def _draw_text_block(lines, font, y, fill, background_fill=None):
-        line_heights = [
-            draw.textbbox((0, 0), line, font=font)[3] - draw.textbbox((0, 0), line, font=font)[1]
-            for line in lines
-        ]
-        line_spacing = int((zh_fontsize if font is zh_font else en_fontsize) * 0.2)
-        total_height = sum(line_heights) + line_spacing * max(len(lines) - 1, 0)
-
-        if background_fill:
-            line_widths = []
-            for line in lines:
-                bbox = draw.textbbox((0, 0), line, font=font)
-                line_widths.append(bbox[2] - bbox[0])
-            pad_x = max(14, round(width * 0.012))
-            pad_y = max(6, round(total_height * 0.16))
-            box_w = max(line_widths) + pad_x * 2 if line_widths else 0
-            box_x = (width - box_w) // 2
-            box_y = int(y - pad_y)
-            radius = max(8, round((total_height + pad_y * 2) * 0.22))
-            draw.rounded_rectangle(
-                (box_x, box_y, box_x + box_w, box_y + total_height + pad_y * 2),
-                radius=radius,
-                fill=background_fill,
-            )
-
-        current_y = y
-        for idx, line in enumerate(lines):
-            bbox = draw.textbbox((0, 0), line, font=font)
-            tw = bbox[2] - bbox[0]
-            x = (width - tw) // 2
-            for dx in [-1, 0, 1]:
-                for dy in [-1, 0, 1]:
-                    if dx != 0 or dy != 0:
-                        draw.text((x + dx, current_y + dy), line, font=font, fill=(0, 0, 0, 150))
-            draw.text((x, current_y), line, font=font, fill=fill)
-            current_y += line_heights[idx] + line_spacing
-
-        return total_height
-
-    # Draw Chinese line (bottom, yellow)
-    if zh_text:
-        wrapped_zh = _wrap_text_by_pixel(zh_text, zh_font, draw, int(width * 0.85))
-        zh_lines = wrapped_zh.split('\n')
-        zh_line_heights = [draw.textbbox((0, 0), line, font=zh_font)[3] - draw.textbbox((0, 0), line, font=zh_font)[1] for line in zh_lines]
-        zh_line_spacing = int(zh_fontsize * 0.2)
-        total_zh_height = sum(zh_line_heights) + zh_line_spacing * (len(zh_lines) - 1)
-
-        if mask_positions:
-            y = mask_positions["zh_bottom"] - total_zh_height
-        else:
-            y = height - margin_bottom_zh - total_zh_height
-        zh_top = y
-        _draw_text_block(
-            zh_lines,
-            zh_font,
-            y,
-            clean_style["zh"]["primary_rgba"] if clean_style else (255, 255, 0, 255),
-            clean_style["zh"]["background_rgba"] if clean_style else None,
-        )
-    else:
-        zh_top = height - margin_bottom_zh
-
-    # Draw English line (above Chinese, white)
+    # Measure English text size
+    en_w, en_h = 0, 0
     if en_text:
-        wrapped_en = _wrap_text_by_pixel(en_text, en_font, draw, int(width * 0.85))
-        en_lines = wrapped_en.split('\n')
-        en_line_heights = [draw.textbbox((0, 0), line, font=en_font)[3] - draw.textbbox((0, 0), line, font=en_font)[1] for line in en_lines]
-        en_line_spacing = int(en_fontsize * 0.2)
-        total_en_height = sum(en_line_heights) + en_line_spacing * (len(en_lines) - 1)
+        en_bbox = draw.textbbox((0, 0), en_text, font=en_font)
+        en_w = en_bbox[2] - en_bbox[0]
+        en_h = en_bbox[3] - en_bbox[1]
 
-        if mask_positions:
-            y = mask_positions["en_bottom"] - total_en_height
-        else:
-            y = zh_top - total_en_height - margin_bottom_en # Use en margin for gap
-        _draw_text_block(
-            en_lines,
-            en_font,
-            y,
-            clean_style["en"]["primary_rgba"] if clean_style else (255, 255, 255, 255),
-            clean_style["en"]["background_rgba"] if clean_style else None,
-        )
+    # Measure Chinese text size
+    zh_w, zh_h = 0, 0
+    if zh_text:
+        zh_bbox = draw.textbbox((0, 0), zh_text, font=zh_font)
+        zh_w = zh_bbox[2] - zh_bbox[0]
+        zh_h = zh_bbox[3] - zh_bbox[1]
+
+    # Return empty frame if no text
+    if not en_text and not zh_text:
+        import numpy as np
+        return np.array(img)
+
+    # Padding inside the card
+    pad_x = max(16, round(width * 0.012))
+    pad_y = max(8, round(height * 0.008))
+
+    content_w = max(en_w, zh_w)
+    content_h = en_h + zh_h + (inter_gap if en_text and zh_text else 0)
+
+    card_w = content_w + pad_x * 2
+    card_h = content_h + pad_y * 2
+
+    card_x = (width - card_w) // 2
+    card_y = height - margin_bottom - card_h
+    card_y = max(10, card_y) # Avoid drawing off-screen at the top
+
+    # Card background: Slate 900 (#0F172A) with 70% opacity -> RGBA(15, 23, 42, 178)
+    card_bg_rgba = (15, 23, 42, 178)
+    radius = max(8, round(card_h * 0.22))
+    draw.rounded_rectangle(
+        (card_x, card_y, card_x + card_w, card_y + card_h),
+        radius=radius,
+        fill=card_bg_rgba,
+    )
+
+    # Draw English text (top line, brighter slate-gray #E2E8F0)
+    if en_text:
+        en_x = (width - en_w) // 2
+        en_y = card_y + pad_y
+        draw.text((en_x, en_y), en_text, font=en_font, fill=(226, 232, 240, 255))
+
+    # Draw Chinese text (bottom line, white)
+    if zh_text:
+        zh_x = (width - zh_w) // 2
+        zh_y = card_y + pad_y + en_h + (inter_gap if en_text else 0)
+        draw.text((zh_x, zh_y), zh_text, font=zh_font, fill=(255, 255, 255, 255))
 
     import numpy as np
     return np.array(img)
@@ -1359,6 +1330,180 @@ def _make_subtitle_overlay_english(
     return np.array(img)
 
 
+def _format_seconds_to_ass_time(seconds: float) -> str:
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    cs = int(round((seconds % 1) * 100))
+    if cs == 100:
+        cs = 0
+        s += 1
+        if s == 60:
+            s = 0
+            m += 1
+            if m == 60:
+                m = 0
+                h += 1
+    return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
+
+
+def _srts_to_bilingual_ass(
+    en_srt_path: str,
+    zh_srt_path: str,
+    play_res_x: int,
+    play_res_y: int,
+    config: Config,
+    is_vertical_video: bool,
+    hard_subtitle_mask: Optional[Dict[str, Any]] = None,
+) -> str:
+    import tempfile, re
+    from PIL import Image, ImageDraw, ImageFont
+
+    en_entries = _parse_srt(en_srt_path) if os.path.exists(en_srt_path) else []
+    zh_entries = _parse_srt(zh_srt_path) if os.path.exists(zh_srt_path) else []
+    min_len = min(len(en_entries), len(zh_entries))
+
+    # Calculate layout values
+    layout = _compute_subtitle_layout(play_res_y, is_vertical_video, config)
+    zh_fontsize = layout["zh_fontsize"]
+    # Scale English font size to 80% of Chinese font size (up from 75%)
+    en_fontsize = max(1, round(zh_fontsize * 0.80))
+    margin_v = layout["margin_v_zh"]
+    inter_gap = layout["inter_gap"]
+
+    # Adjust vertical margin if we have a mask card (replace hard subtitles mode)
+    if hard_subtitle_mask:
+        mask_y = int(hard_subtitle_mask["y"])
+        mask_h = int(hard_subtitle_mask["h"])
+        mask_bottom_v = play_res_y - (mask_y + mask_h)
+        margin_v = max(1, mask_bottom_v + max(4, round(play_res_y * 0.005)))
+
+    font_zh = _find_cjk_font(config) or config.font_name_zh
+    font_en = config.font_name_en
+
+    # Load fonts in PIL to measure exact text dimensions
+    try:
+        en_font = ImageFont.truetype(font_en, en_fontsize) if font_en else ImageFont.load_default()
+    except Exception:
+        en_font = ImageFont.load_default()
+    try:
+        zh_font = ImageFont.truetype(font_zh, zh_fontsize) if font_zh else ImageFont.load_default()
+    except Exception:
+        zh_font = ImageFont.load_default()
+
+    dummy_img = Image.new("RGBA", (1, 1))
+    dummy_draw = ImageDraw.Draw(dummy_img)
+
+    # Card background: Slate 900 (#0F172A) with 70% opacity
+    # ASS hex color format: &H<BB><GG><RR>& (no alpha in the primary color code, alpha is separate)
+    card_colour = "&H2A170F&"
+    card_alpha = "&H4C&"  # 70% opacity -> 30% transparency -> 76/255 -> 4C in hex
+    
+    # Text colors
+    # Chinese (white): #FFFFFF -> &HFFFFFF&
+    # English (yellow): #FFD700 -> Blue=00, Green=D7, Red=FF -> &H00D7FF&
+    color_zh = "&HFFFFFF&"
+    color_en = "&H00D7FF&"
+
+    # Style line: BorderStyle=1 (no box), Outline=0 (no border outline), Shadow=0
+    style_line = (
+        f"{font_zh},{zh_fontsize},&H00FFFFFF&,&H000000FF&,&H00000000&,&H00000000&,"
+        f"0,0,0,0,100,100,0,0,1,0,0,2,10,10,{margin_v},1"
+    )
+
+    events = []
+    for i in range(min_len):
+        en_entry = en_entries[i]
+        zh_entry = zh_entries[i]
+
+        start = _format_seconds_to_ass_time(en_entry["start"])
+        end = _format_seconds_to_ass_time(en_entry["end"])
+
+        # Strip any existing newlines or consecutive spaces to prevent wrapping
+        en_text = re.sub(r'\s+', ' ', en_entry["text"].replace('\n', ' ')).strip()
+        zh_text = re.sub(r'\s+', ' ', zh_entry["text"].replace('\n', ' ')).strip()
+
+        # Measure text dimensions
+        en_w, en_h = 0, 0
+        if en_text:
+            en_bbox = dummy_draw.textbbox((0, 0), en_text, font=en_font)
+            en_w = en_bbox[2] - en_bbox[0]
+            en_h = en_bbox[3] - en_bbox[1]
+
+        zh_w, zh_h = 0, 0
+        if zh_text:
+            zh_bbox = dummy_draw.textbbox((0, 0), zh_text, font=zh_font)
+            zh_w = zh_bbox[2] - zh_bbox[0]
+            zh_h = zh_bbox[3] - zh_bbox[1]
+
+        # Padding inside the card
+        pad_x = max(16, round(play_res_x * 0.012))
+        pad_y = max(8, round(play_res_y * 0.008))
+
+        content_w = max(en_w, zh_w)
+        content_h = en_h + zh_h + (inter_gap if en_text and zh_text else 0)
+
+        card_w = content_w + pad_x * 2
+        card_h = content_h + pad_y * 2
+
+        card_x = (play_res_x - card_w) // 2
+        card_y = play_res_y - margin_v - card_h
+        card_y = max(10, card_y) # Avoid drawing off-screen at the top
+
+        # Rounded rectangle corners radius
+        R = max(8, round(card_h * 0.22))
+        R = min(R, min(card_w, card_h) // 2)
+
+        # Layer 0: Background card drawing (Rounded Rectangle)
+        cp = int(R * 0.55228)
+        drawing_path = (
+            f"m {R} 0 "
+            f"l {card_w - R} 0 "
+            f"b {card_w - R + cp} 0 {card_w} {R - cp} {card_w} {R} "
+            f"l {card_w} {card_h - R} "
+            f"b {card_w} {card_h - R + cp} {card_w - R + cp} {card_h} {card_w - R} {card_h} "
+            f"l {R} {card_h} "
+            f"b {R - cp} {card_h} 0 {card_h - R + cp} 0 {card_h - R} "
+            f"l 0 {R} "
+            f"b 0 {R - cp} {R - cp} 0 {R} 0"
+        )
+        bg_event = (
+            f"Dialogue: 0,{start},{end},Default,,0,0,0,,"
+            f"{{\\an7\\p1\\c{card_colour}\\1a{card_alpha}\\pos({card_x},{card_y})}}{drawing_path}{{\\p0}}"
+        )
+        events.append(bg_event)
+
+        # Layer 1: Text event
+        text_y_anchor = card_y + card_h - pad_y
+        text = (
+            f"{{\\an2\\pos({play_res_x // 2},{text_y_anchor})}}"
+            f"{{\\q2\\fn{font_en}\\fs{en_fontsize}\\c{color_en}}}{en_text}\\N"
+            f"{{\\fn{font_zh}\\fs{zh_fontsize}\\c{color_zh}}}{zh_text}"
+        )
+        text_event = f"Dialogue: 1,{start},{end},Default,,0,0,0,,{text}"
+        events.append(text_event)
+
+    ass_content = f"""[Script Info]
+ScriptType: v4.00+
+PlayResX: {play_res_x}
+PlayResY: {play_res_y}
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,{style_line}
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+    ass_content += '\n'.join(events)
+
+    tmp = tempfile.NamedTemporaryFile(suffix='.ass', delete=False, mode='w', encoding='utf-8')
+    tmp.write(ass_content)
+    tmp.close()
+    return tmp.name
+
+
 def _hard_burn_bilingual_ffmpeg(video_path: str, en_srt_path: str, zh_srt_path: str,
                                 output_path: str,
                                 ocr_lang: Optional[str] = None,
@@ -1392,6 +1537,7 @@ def _hard_burn_bilingual_ffmpeg(video_path: str, en_srt_path: str, zh_srt_path: 
                      f"skipping ZH soft subtitle, moving EN to top.")
 
     video_height = video_dimensions['height'] if video_dimensions else 1080
+    video_width = video_dimensions['width'] if video_dimensions else 1920
     layout = _compute_subtitle_layout(
         video_height, is_vertical_video, config,
         hard_subtitle_lang=ocr_lang if ocr_lang in {"en", "zh"} else None,
@@ -1406,8 +1552,7 @@ def _hard_burn_bilingual_ffmpeg(video_path: str, en_srt_path: str, zh_srt_path: 
     def esc(p):
         return p.replace('\\', '/').replace(':', '\\:')
 
-    zh_alignment = 2  # bottom-center (MarginV controls vertical position)
-
+    # Helper function for single-language fallbacks
     def _srt_to_ass(srt_path: str, style_line: str, play_res_x: int, play_res_y: int, pos_override: tuple = None) -> str:
         """Convert SRT to ASS with explicit style, write to temp file, return path."""
         import tempfile, re
@@ -1415,7 +1560,6 @@ def _hard_burn_bilingual_ffmpeg(video_path: str, en_srt_path: str, zh_srt_path: 
             srt_content = f.read()
         
         def srt_time_to_ass(t: str) -> str:
-            # 00:00:01,000 -> 0:00:01.00
             t = t.replace(',', '.')
             parts = t.split(':')
             h, m, s = parts[0], parts[1], parts[2]
@@ -1461,7 +1605,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         tmp.close()
         return tmp.name
 
-    # Build ASS style lines (Name,Font,Size,PrimaryColour,...,MarginV,Encoding)
     def _ass_style_line(
         fontname,
         fontsize,
@@ -1477,78 +1620,78 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         return (f"{fontname},{fontsize},{primary_colour},&H000000FF&,{outline_colour},{back_colour},"
                 f"0,0,0,0,100,100,0,0,{border_style},{outline},{shadow},{alignment},10,10,{margin_v},1")
 
-    video_w = video_dimensions['width'] if video_dimensions else 1920
-    video_h = video_dimensions['height'] if video_dimensions else 1080
-    clean_style = _get_clean_dual_subtitle_style() if not hard_subtitle_mask and not has_en_hard_subtitle and not has_zh_hard_subtitle else None
-    if clean_style:
-        en_fontsize = max(1, round(en_fontsize * clean_style["en"]["font_scale"]))
-        zh_fontsize = max(1, round(zh_fontsize * clean_style["zh"]["font_scale"]))
-        margin_v_en = margin_v_zh + zh_fontsize + layout["inter_gap"]
-
-    zh_ass_style = _ass_style_line(
-        fontname=config.font_name_zh or config.font_name_en,
-        fontsize=zh_fontsize,
-        primary_colour=clean_style["zh"]["primary_ass"] if clean_style else '&H0000FFFF&',
-        outline_colour=clean_style["zh"]["back_ass"] if clean_style else '&H00000000&',
-        outline=8 if clean_style else 1,
-        alignment=zh_alignment,
-        margin_v=margin_v_zh,
-        back_colour=clean_style["zh"]["back_ass"] if clean_style else "&H00000000&",
-        border_style=3 if clean_style else 1,
-    )
-    en_ass_style = _ass_style_line(
-        fontname=config.font_name_en,
-        fontsize=en_fontsize,
-        primary_colour=clean_style["en"]["primary_ass"] if clean_style else '&H00FFFFFF&',
-        outline_colour=clean_style["en"]["back_ass"] if clean_style else '&H00000000&',
-        outline=8 if clean_style else 1,
-        alignment=2,
-        margin_v=margin_v_en,
-        back_colour=clean_style["en"]["back_ass"] if clean_style else "&H00000000&",
-        border_style=3 if clean_style else 1,
-    )
-
-    # For single-soft-subtitle modes, use absolute pos override in PlayRes coords.
-    zh_pos_override = None
-    en_pos_override = None
-    if hard_subtitle_mask:
-        mask_positions = _compute_mask_text_positions(
-            mask_x=int(hard_subtitle_mask["x"]),
-            mask_y=int(hard_subtitle_mask["y"]),
-            mask_w=int(hard_subtitle_mask["w"]),
-            mask_h=int(hard_subtitle_mask["h"]),
-            video_h=video_h,
-            en_fontsize=en_fontsize,
-            zh_fontsize=zh_fontsize,
-            inter_gap=layout["inter_gap"],
-        )
-        center_x = mask_positions["center_x"]
-        en_pos_override = (center_x, mask_positions["en_bottom"])
-        zh_pos_override = (center_x, mask_positions["zh_bottom"])
-    elif has_en_hard_subtitle:
-        en_top_px = int(subtitle_boundary * video_h)  # e.g. 0.8333 * 1080 = 899px
-        gap_px = max(4, round(zh_fontsize * 0.12))
-        zh_bottom_target = en_top_px - gap_px
-        zh_pos_override = (video_w // 2, zh_bottom_target)
-    elif has_zh_hard_subtitle:
-        zh_top_px = int(subtitle_boundary * video_h)
-        gap_px = max(4, round(en_fontsize * 0.12))
-        # Horizontal samples proved more sensitive: aggressive downward shifts
-        # overlap with the existing ZH hard subtitles. Keep them conservative.
-        # Vertical samples still benefit from a tighter visual gap.
-        if is_vertical_video:
-            en_bottom_target = zh_top_px + round(en_fontsize * 0.18) - gap_px
-        else:
-            en_bottom_target = zh_top_px - gap_px
-        en_pos_override = (video_w // 2, en_bottom_target)
-
-    zh_ass_path = _srt_to_ass(zh_srt_path, zh_ass_style, video_w, video_h, pos_override=zh_pos_override)
-    en_ass_path = _srt_to_ass(en_srt_path, en_ass_style, video_w, video_h, pos_override=en_pos_override)
-
-    en_filter = f"ass={esc(en_ass_path)}"
-    zh_filter = f"ass={esc(zh_ass_path)}"
-
+    bilingual_ass_path = None
+    zh_ass_path = None
+    en_ass_path = None
     overlay_path = None
+
+    if not has_en_hard_subtitle and not has_zh_hard_subtitle:
+        # Unified bilingual card mode
+        bilingual_ass_path = _srts_to_bilingual_ass(
+            en_srt_path,
+            zh_srt_path,
+            video_width,
+            video_height,
+            config,
+            is_vertical_video,
+            hard_subtitle_mask=hard_subtitle_mask,
+        )
+        if hard_subtitle_mask:
+            vf = f"[0:v][1:v]overlay=0:0,ass={esc(bilingual_ass_path)}[v]"
+        else:
+            vf = f"ass={esc(bilingual_ass_path)}"
+    else:
+        # Single language fallbacks (when preserving source hard subtitles)
+        zh_pos_override = None
+        en_pos_override = None
+        if has_en_hard_subtitle:
+            en_top_px = int(subtitle_boundary * video_height)
+            gap_px = max(4, round(zh_fontsize * 0.12))
+            zh_bottom_target = en_top_px - gap_px
+            zh_pos_override = (video_width // 2, zh_bottom_target)
+        elif has_zh_hard_subtitle:
+            zh_top_px = int(subtitle_boundary * video_height)
+            gap_px = max(4, round(en_fontsize * 0.12))
+            if is_vertical_video:
+                en_bottom_target = zh_top_px + round(en_fontsize * 0.18) - gap_px
+            else:
+                en_bottom_target = zh_top_px - gap_px
+            en_pos_override = (video_width // 2, en_bottom_target)
+
+        zh_ass_style = _ass_style_line(
+            fontname=config.font_name_zh or config.font_name_en,
+            fontsize=zh_fontsize,
+            primary_colour='&H0000FFFF&',
+            outline_colour='&H00000000&',
+            outline=1,
+            alignment=2,
+            margin_v=margin_v_zh,
+            back_colour="&H00000000&",
+            border_style=1,
+        )
+        en_ass_style = _ass_style_line(
+            fontname=config.font_name_en,
+            fontsize=en_fontsize,
+            primary_colour='&H00FFFFFF&',
+            outline_colour='&H00000000&',
+            outline=1,
+            alignment=2,
+            margin_v=margin_v_en,
+            back_colour="&H00000000&",
+            border_style=1,
+        )
+
+        zh_ass_path = _srt_to_ass(zh_srt_path, zh_ass_style, video_width, video_height, pos_override=zh_pos_override)
+        en_ass_path = _srt_to_ass(en_srt_path, en_ass_style, video_width, video_height, pos_override=en_pos_override)
+
+        en_filter = f"ass={esc(en_ass_path)}"
+        zh_filter = f"ass={esc(zh_ass_path)}"
+
+        if has_en_hard_subtitle:
+            vf = zh_filter
+        else:
+            vf = en_filter
+
     if hard_subtitle_mask:
         mask_x = int(hard_subtitle_mask["x"])
         mask_y = int(hard_subtitle_mask["y"])
@@ -1557,13 +1700,13 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         mask_radius = int(hard_subtitle_mask.get("radius_px", 0))
         mask_feather = int(hard_subtitle_mask.get("feather_px", 0))
         mask_color = hard_subtitle_mask.get("color", config.subtitle_hard_mask_color)
-        import tempfile
         overlay_image = _build_hard_subtitle_mask_overlay_image(
-            video_width=video_w,
-            video_height=video_h,
+            video_width=video_width,
+            video_height=video_height,
             hard_subtitle_mask=hard_subtitle_mask,
             color=mask_color,
         )
+        import tempfile
         overlay_tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
         overlay_path = overlay_tmp.name
         overlay_tmp.close()
@@ -1579,35 +1722,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             mask_color,
         )
 
-    # When source already has a hard subtitle track and we are preserving it: burn only the missing language.
-    if has_en_hard_subtitle and not hard_subtitle_mask:
-        vf = zh_filter
-        logging.info(
-            "  EN hard subtitle detected: burning ZH only above boundary %.4f (target_bottom_px=%s).",
-            subtitle_boundary,
-            zh_pos_override[1] if zh_pos_override else "n/a",
-        )
-    elif has_zh_hard_subtitle and not hard_subtitle_mask:
-        vf = en_filter
-        logging.info(
-            "  ZH hard subtitle detected: burning EN only above boundary %.4f (target_bottom_px=%s).",
-            subtitle_boundary,
-            en_pos_override[1] if en_pos_override else "n/a",
-        )
-    else:
-        if hard_subtitle_mask:
-            vf = f"[0:v][1:v]overlay=0:0,{en_filter},{zh_filter}[v]"
-        else:
-            vf = ",".join([en_filter, zh_filter])
-        if hard_subtitle_mask:
-            logging.info(
-                "  Hard subtitle replacement mode: burning unified EN+ZH dual subtitles inside mask "
-                "(en_bottom_px=%s, zh_bottom_px=%s).",
-                en_pos_override[1] if en_pos_override else "n/a",
-                zh_pos_override[1] if zh_pos_override else "n/a",
-            )
-
-    # Use imageio_ffmpeg binary because Homebrew FFmpeg often lacks libass/subtitles filter
+    # Use imageio_ffmpeg binary
     try:
         import imageio_ffmpeg
         ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
@@ -1655,11 +1770,13 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         logging.debug(f"[FFmpeg subtitles] Exception: {e}")
         return False
     finally:
-        if overlay_path and os.path.exists(overlay_path):
-            try:
-                os.unlink(overlay_path)
-            except Exception:
-                pass
+        # Clean up temporary files
+        for p in (overlay_path, bilingual_ass_path, zh_ass_path, en_ass_path):
+            if p and os.path.exists(p):
+                try:
+                    os.unlink(p)
+                except Exception:
+                    pass
 
 
 def _hard_burn_bilingual(video_path: str, en_srt_path: str, zh_srt_path: str,
