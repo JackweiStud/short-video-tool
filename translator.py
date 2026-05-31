@@ -136,44 +136,6 @@ def _translation_has_meta_output(texts: List[str]) -> bool:
     return False
 
 
-def _extract_json_array_payload(raw: str) -> List[str]:
-    """
-    Parse a JSON-array response from an LLM.
-
-    Accepts:
-    - raw JSON arrays: ["a", "b"]
-    - fenced JSON blocks
-    - {"translations": ["a", "b"]} style objects
-    """
-    content = (raw or "").strip()
-    if not content:
-        return []
-
-    fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)```", content, re.DOTALL)
-    if fence_match:
-        content = fence_match.group(1).strip()
-
-    candidates = [content]
-    start = content.find("[")
-    end = content.rfind("]")
-    if start != -1 and end != -1 and end > start:
-        candidates.append(content[start:end + 1])
-
-    for candidate in candidates:
-        try:
-            parsed = json.loads(candidate)
-        except Exception:
-            continue
-
-        if isinstance(parsed, list) and all(isinstance(item, str) for item in parsed):
-            return [item.strip() for item in parsed]
-        if isinstance(parsed, dict):
-            translations = parsed.get("translations")
-            if isinstance(translations, list) and all(isinstance(item, str) for item in translations):
-                return [item.strip() for item in translations]
-
-    return []
-
 def _get_video_dimensions(video_path: str) -> Optional[Dict]:
     """
     使用 ffprobe 获取视频的宽度和高度。
@@ -991,31 +953,41 @@ Keep the same numbering format. Only output the translated texts, no explanation
 
         lang_name = "Chinese (Simplified)" if target_lang == "zh" else "English"
         n = len(texts)
-        numbered = json.dumps(texts, ensure_ascii=False)
+        numbered_input = "\n".join(f"{i+1}. {t}" for i, t in enumerate(texts))
 
+        # attempt 0: numbered list — proven more robust against LLM segment merging
         base_system_prompt = (
-            f"你是专业字幕翻译器。"
-            f"输入是一个 JSON array，包含 {n} 个字幕片段字符串。"
-            f"输出必须是一个合法 JSON array，长度必须严格等于 {n}，且顺序必须与输入完全一致。"
-            f"每个输入元素必须且只能对应一个输出元素，严格 1:1 对齐。"
-            f"禁止合并、拆分、跳过、漏项、补写、解释、注释、占位说明、Markdown、代码块。"
-            f"即使某一行很短，也必须单独翻译成一个数组元素。"
-            f"即使某一句很长，也不能拆成多个输出元素。"
-            f"翻译目标语言是 {lang_name}，要自然、简洁、适合字幕阅读。"
+            f"你是专业字幕翻译器。输入是带序号的 {n} 行字幕原文。"
+            f"你必须输出恰好 {n} 行译文，每行格式为 '序号. 译文'，序号从 1 到 {n} 连续，不能跳号、合并或漏行。"
+            f"不要输出任何序号范围以外的内容、解释或 Markdown。"
+            f"翻译目标语言是 {lang_name}，译文要自然、简洁、适合字幕阅读。"
         )
         base_user_prompt = (
-            f"请将下面这个 JSON array 逐元素翻译为 {lang_name}。"
-            f"你必须保留与输入相同的条目数和顺序，不能合并、拆分或漏掉任何条目。"
-            f"只返回 JSON array，不要返回其他内容：\n\n{numbered}"
+            f"请将下面每行字幕翻译为 {lang_name}，严格保持序号和行数（共 {n} 行）。"
+            f"只返回带序号的译文行，不要返回其他内容：\n\n{numbered_input}"
         )
 
-        # Token budget per chunk
-        # Siliconflow API actual limit appears to be lower than 8192
-        # Use conservative estimate to avoid 400 errors
+        # attempt 1: same numbered format with stronger anti-merge emphasis
+        retry_system_prompt = (
+            f"你是专业字幕翻译器。输入是带序号的 {n} 行字幕原文，必须逐行翻译，严禁合并。"
+            f"即使相邻两行原文高度相似或很短，也必须各自独立翻译，分别输出为 2 行，绝对不允许合并成 1 行。"
+            f"输出必须恰好 {n} 行，格式严格为 '序号. 译文'（序号 1 到 {n} 连续），不得跳号或漏行。"
+            f"不要输出其他内容。翻译目标语言是 {lang_name}，译文简洁适合字幕阅读。"
+        )
+        if target_lang == "zh":
+            retry_system_prompt += " 除专有名词、缩写、数字外，禁止输出英文整句；所有内容翻译成中文。"
+        elif target_lang == "en":
+            retry_system_prompt += " 禁止输出中文；所有内容翻译成自然英文。"
+        retry_user_prompt = (
+            f"输入共 {n} 行，每行都必须有对应的译文行，不能少。"
+            f"请翻译为 {lang_name}，只返回带序号的译文：\n\n{numbered_input}"
+        )
+
+        # Token budget: DeepSeek-V3.2 supports up to 8192 output tokens via Siliconflow
         avg_chars = sum(len(t) for t in texts) / max(n, 1)
         estimated_output_tokens = int(n * max(avg_chars * 2.5, 30)) + 300
-        # Add 20% safety margin to avoid truncation, but cap at 4096
-        max_tokens = max(1024, min(int(estimated_output_tokens * 1.2), 4096))
+        # 40% safety margin; cap raised to 8192 for DeepSeek-V3.2
+        max_tokens = max(1024, min(int(estimated_output_tokens * 1.4), 8192))
         logging.debug(f"[Siliconflow] Chunk size={n}, avg_chars={avg_chars:.1f}, estimated_tokens={estimated_output_tokens}, max_tokens={max_tokens}")
 
         def _parse_numbered(raw: str, n: int):
@@ -1031,21 +1003,20 @@ Keep the same numbering format. Only output the translated texts, no explanation
                         result.append(parts[1].strip())
             return result
 
+        # attempt 1 uses higher max_tokens in case the first try was on the edge
+        retry_max_tokens = min(int(max_tokens * 1.5), 8192)
+
         for attempt in range(2):  # retry once on mismatch
             try:
-                system_prompt = base_system_prompt
-                user_prompt = base_user_prompt
-                if attempt > 0:
-                    if target_lang == "zh":
-                        system_prompt += (
-                            " 如果目标语言是中文，除专有名词、缩写、数字外，禁止输出英文整句。"
-                            " 如果某行原文本来就是英文，也必须翻译成中文，不允许原样保留英文句子。"
-                        )
-                    elif target_lang == "en":
-                        system_prompt += (
-                            " 如果目标语言是英文，禁止输出任何中文句子。"
-                            " 输出必须是自然英文，不允许把原句翻成中文。"
-                        )
+                if attempt == 0:
+                    system_prompt = base_system_prompt
+                    user_prompt = base_user_prompt
+                    current_max_tokens = max_tokens
+                else:
+                    # Stronger anti-merge emphasis on retry
+                    system_prompt = retry_system_prompt
+                    user_prompt = retry_user_prompt
+                    current_max_tokens = retry_max_tokens
 
                 response = self._openai_client.chat.completions.create(
                     model=self.model,
@@ -1054,13 +1025,16 @@ Keep the same numbering format. Only output the translated texts, no explanation
                         {"role": "user",   "content": user_prompt},
                     ],
                     temperature=0.2,
-                    max_tokens=max_tokens,
+                    max_tokens=current_max_tokens,
                 )
 
                 raw = response.choices[0].message.content.strip()
-                logging.debug(f"[Siliconflow] attempt {attempt+1} raw response:\n{raw}")
+                finish_reason = getattr(response.choices[0], "finish_reason", None)
+                logging.debug(
+                    f"[Siliconflow] attempt {attempt+1} finish_reason={finish_reason} raw response:\n{raw}"
+                )
 
-                translated = _extract_json_array_payload(raw)
+                translated = _parse_numbered(raw, n)
 
                 if (
                     len(translated) == len(texts)
@@ -1075,22 +1049,25 @@ Keep the same numbering format. Only output the translated texts, no explanation
                 if drift_detected:
                     logging.warning(
                         f"[Siliconflow] language drift detected (attempt {attempt+1}, target={target_lang}) "
-                        + ("Retrying..." if attempt == 0 else "Falling back to Google Translate.")
+                        + ("Retrying with stronger prompt..." if attempt == 0 else "Falling back to Google Translate.")
                     )
                     continue
 
                 if meta_output_detected:
                     logging.warning(
                         f"[Siliconflow] meta-output detected (attempt {attempt+1}, target={target_lang}) "
-                        + ("Retrying..." if attempt == 0 else "Falling back to finer-grained translation.")
+                        + ("Retrying with stronger prompt..." if attempt == 0 else "Falling back to finer-grained translation.")
                     )
                     continue
 
+                truncated = finish_reason == "length"
                 logging.warning(
                     f"[Siliconflow] count mismatch (attempt {attempt+1}): "
                     f"expected {len(texts)}, got {len(translated)} "
-                    f"(max_tokens={max_tokens})."
-                    + (" Retrying..." if attempt == 0 else " Falling back to finer-grained translation.")
+                    f"(max_tokens={current_max_tokens}, finish_reason={finish_reason}"
+                    + (", likely truncated" if truncated else ", likely segment merge")
+                    + ")."
+                    + (" Retrying with stronger prompt..." if attempt == 0 else " Falling back to finer-grained translation.")
                 )
 
             except Exception as e:

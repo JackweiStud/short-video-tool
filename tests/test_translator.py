@@ -9,7 +9,6 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from translator import (
     Translator,
-    _extract_json_array_payload,
     _snap_chunk_intervals_to_word_boundaries,
     _split_long_segments,
     _translation_has_language_drift,
@@ -333,21 +332,22 @@ class TestTranslatorFunctionality:
         assert _translation_has_language_drift(["Exactly right.", "Where does that go?"], "zh") is True
         assert _translation_has_language_drift(["NBA", "NVIDIA"], "zh") is False
 
-    def test_extract_json_array_payload_accepts_fenced_json(self):
-        raw = '```json\n["第一行", "第二行"]\n```'
-        assert _extract_json_array_payload(raw) == ["第一行", "第二行"]
-
     def test_meta_output_detection_rejects_placeholder_notes(self):
         assert _translation_has_meta_output(["正常字幕", "（此处应为空行，因原文第19行无实质内容）"]) is True
         assert _translation_has_meta_output(["正常字幕", "继续翻译"]) is False
 
-    def test_siliconflow_prefers_json_array_protocol(self):
+    def test_siliconflow_parses_numbered_line_protocol(self):
         translator = Translator()
         translator.backend = "siliconflow"
         translator.model = "fake-model"
 
         response = SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content='["完全正确。", "我们开始吧。"]'))]
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="1. 完全正确。\n2. 我们开始吧。"),
+                    finish_reason="stop",
+                )
+            ]
         )
         translator._openai_client = SimpleNamespace(
             chat=SimpleNamespace(
@@ -369,7 +369,12 @@ class TestTranslatorFunctionality:
         translator.model = "fake-model"
 
         bad_response = SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content="1. 完全正确。\n2. 我们开始吧。"))]
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="1. 完全正确。\n2. 我们开始吧。"),
+                    finish_reason="stop",
+                )
+            ]
         )
         translator._openai_client = SimpleNamespace(
             chat=SimpleNamespace(
@@ -400,7 +405,12 @@ class TestTranslatorFunctionality:
         translator.model = "fake-model"
 
         bad_response = SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content="1. Exactly right.\n2. Where should that go?"))]
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="1. Exactly right.\n2. Where should that go?"),
+                    finish_reason="stop",
+                )
+            ]
         )
         translator._openai_client = SimpleNamespace(
             chat=SimpleNamespace(
