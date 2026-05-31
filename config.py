@@ -483,7 +483,18 @@ class Config:
         default_factory=lambda: int(os.getenv("DOWNLOAD_RETRIES", "5"))
     )
     """下载重试次数"""
-    
+
+    download_concurrency: int = field(
+        default_factory=lambda: int(os.getenv("DOWNLOAD_CONCURRENCY", "16"))
+    )
+    """HLS/DASH 分片并发下载数。X/Twitter 的 CDN 会对单连接限速，
+    串行逐片下载极慢；提高并发可成倍加速。遇到 429 限流可调低（如 8）。"""
+
+    download_external_aria2c: bool = field(
+        default_factory=lambda: os.getenv("DOWNLOAD_EXTERNAL_ARIA2C", "true").lower() == "true"
+    )
+    """是否在检测到 aria2c 时用其作为外部下载器（多连接/分块进一步加速）。"""
+
     # ==================== 处理设置 ====================
     
     ffmpeg_timeout: int = field(
@@ -663,6 +674,8 @@ class Config:
                 "ytdlp_youtube_player_client": self.ytdlp_youtube_player_client,
                 "video_quality": self.video_quality,
                 "download_retries": self.download_retries,
+                "download_concurrency": self.download_concurrency,
+                "download_external_aria2c": self.download_external_aria2c,
             },
             "processing": {
                 "ffmpeg_timeout": self.ffmpeg_timeout,

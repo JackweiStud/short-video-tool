@@ -1,6 +1,7 @@
 
 import yt_dlp
 import os
+import shutil
 import logging
 import glob
 import re
@@ -148,14 +149,34 @@ class Downloader:
         """
         logging.info(f"Attempting to download video from: {url} with quality: {quality}")
         
+        is_twitter = ("x.com" in url) or ("twitter.com" in url)
+
         # yt-dlp format selection logic
-        # Improved for YouTube and other platforms to get actual best resolution
+        # For X/Twitter we prefer a progressive (single-file HTTP) muxed stream first:
+        # those CDNs throttle each connection hard, and a pre-muxed MP4 avoids the extra
+        # serial audio-stream download + merge. If no progressive format exists we fall
+        # back to the classic bestvideo+bestaudio split (then sped up by concurrent
+        # fragment downloads, see ydl_opts below).
+        #
+        # We deliberately do NOT prefer progressive for other sites (e.g. YouTube),
+        # because their progressive muxed streams cap at 720p — preferring them would
+        # silently downgrade a 1080p request. Those sites keep the split format, which
+        # already benefits from concurrent_fragment_downloads.
         if quality == "best":
-            format_string = 'bestvideo+bestaudio/best'
+            if is_twitter:
+                format_string = 'best[protocol^=http][acodec!=none][vcodec!=none]/bestvideo+bestaudio/best'
+            else:
+                format_string = 'bestvideo+bestaudio/best'
         elif quality.endswith('p'):
-            # Example: '1080p' -> select best video with height <= 1080 and best audio
+            # Example: '1080p' -> best video with height <= 1080 and best audio
             h = quality[:-1]
-            format_string = f'bestvideo[height<={h}]+bestaudio/best[height<={h}]'
+            if is_twitter:
+                format_string = (
+                    f'best[height<={h}][protocol^=http][acodec!=none][vcodec!=none]/'
+                    f'bestvideo[height<={h}]+bestaudio/best[height<={h}]'
+                )
+            else:
+                format_string = f'bestvideo[height<={h}]+bestaudio/best[height<={h}]'
         else:
             format_string = quality # e.g., 'worst' or specific IDs
 
@@ -174,6 +195,44 @@ class Downloader:
             'quiet': True,      # Suppress most console output
             'no_warnings': True, # Suppress warnings
         }
+
+        # ── Download acceleration ──────────────────────────────────────────────
+        # X/Twitter (and most HLS/DASH sources) throttle each HTTP connection, so
+        # yt-dlp's default serial fragment download is the dominant cost. Downloading
+        # many fragments concurrently multiplies the aggregate throughput.
+        concurrency = max(1, int(getattr(self.config, "download_concurrency", 16)))
+        if concurrency > 1:
+            ydl_opts['concurrent_fragment_downloads'] = concurrency
+
+        # For single-file (progressive) downloads, range-chunking can bypass
+        # per-request throttling on some CDNs.
+        ydl_opts['http_chunk_size'] = 10 * 1024 * 1024  # 10 MiB
+
+        # Optionally delegate to aria2c (multi-connection / split download) when present.
+        # IMPORTANT: scope aria2c to progressive http(s) only. For HLS/DASH fragmented
+        # streams the native downloader + concurrent_fragment_downloads is faster than
+        # invoking aria2c per fragment, so we keep those on the native path.
+        use_aria2c = getattr(self.config, "download_external_aria2c", True)
+        if use_aria2c and shutil.which("aria2c"):
+            # aria2c caps --max-connection-per-server (-x) at 16; clamp to avoid an
+            # error when DOWNLOAD_CONCURRENCY is set higher. -s (split) has no such cap.
+            aria_x = min(concurrency, 16)
+            ydl_opts['external_downloader'] = {'http': 'aria2c', 'https': 'aria2c'}
+            ydl_opts['external_downloader_args'] = {
+                'aria2c': [
+                    '-x', str(aria_x),        # max connections per server (<=16)
+                    '-s', str(concurrency),   # split count
+                    '-k', '1M',               # min split size
+                    '--max-tries=5',
+                    '--retry-wait=2',
+                ]
+            }
+            logging.info(
+                f"[Downloader] aria2c enabled for progressive http (x{concurrency}); "
+                f"HLS/DASH use native concurrent_fragments={concurrency}"
+            )
+        else:
+            logging.info(f"[Downloader] Native downloader, concurrent_fragments={concurrency}")
 
         cookies_browser = getattr(self.config, "ytdlp_cookies_browser", "").strip()
         if cookies_browser:
