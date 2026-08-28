@@ -11,8 +11,13 @@ __pycache__/
 dist/
 build/
 
-# Environment
+# Environment & Secrets
 .env
+.env.*
+!.env.example
+*.key
+*.pem
+*secret*
 
 # Project specific
 runtime/tasks/
@@ -35,6 +40,7 @@ cache/
 
 # Logs
 *.log
+logs/
 
 # macOS
 .DS_Store
