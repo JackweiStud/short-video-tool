@@ -12,7 +12,7 @@ from datetime import datetime
 from multiprocessing import set_start_method
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 from difflib import SequenceMatcher
 
 import librosa

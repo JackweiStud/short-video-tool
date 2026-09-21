@@ -483,10 +483,10 @@ def _try_soft_embed(video_path: str, subtitle_path: str, output_path: str) -> bo
 # ──────────────────────────────────────────────
 
 def _find_cjk_font(config: Config):
-    """Find a CJK-capable font on macOS for Chinese rendering."""
-    # Map known libass/CoreText family names to their actual file paths.
+    """Find a CJK-capable font path (macOS + Linux) for Chinese rendering."""
+    # Map known libass family names to their actual file paths.
     # Family names (non-path strings) are NOT resolvable via os.path.exists;
-    # we must map them explicitly to avoid silently falling through to PingFang.
+    # we must map them explicitly to avoid silently falling through.
     _family_to_path = {
         "Heiti SC": "/System/Library/Fonts/STHeiti Medium.ttc",
         "Heiti TC": "/System/Library/Fonts/STHeiti Medium.ttc",
@@ -494,23 +494,32 @@ def _find_cjk_font(config: Config):
         "PingFang SC": "/System/Library/Fonts/PingFang.ttc",
         "PingFang TC": "/System/Library/Fonts/PingFang.ttc",
         "PingFang HK": "/System/Library/Fonts/PingFang.ttc",
+        "Noto Sans CJK SC": "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "Noto Sans CJK": "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "WenQuanYi Micro Hei": "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+        "WenQuanYi Zen Hei": "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
     }
     configured = config.font_name_zh
     # If configured value is a family name, resolve to path first
-    if configured and not os.path.sep in configured:
+    if configured and os.path.sep not in configured:
         resolved = _family_to_path.get(configured)
         if resolved and os.path.exists(resolved):
             return resolved
     # If it looks like a path, check directly
     elif configured and os.path.exists(configured):
         return configured
-    # Fallback candidates (paths only)
+    # Fallback candidates (paths only) — macOS then Linux
     fallback_paths = [
         "/System/Library/Fonts/STHeiti Medium.ttc",
         "/System/Library/Fonts/PingFang.ttc",
         "/System/Library/Fonts/Hiragino Sans GB.ttc",
         "/Library/Fonts/Arial Unicode.ttf",
         "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
+        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
     ]
     for f in fallback_paths:
         if os.path.exists(f):
@@ -518,29 +527,110 @@ def _find_cjk_font(config: Config):
     return None
 
 
+def _find_latin_font(config: Config):
+    """Find a Latin/English font path (macOS + Linux) for PIL measurement."""
+    _family_to_path = {
+        "Arial": "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "Helvetica": "/System/Library/Fonts/Helvetica.ttc",
+        "Liberation Sans": "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "DejaVu Sans": "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    }
+    configured = getattr(config, "font_name_en", None)
+    if configured and os.path.sep not in configured:
+        resolved = _family_to_path.get(configured)
+        if resolved and os.path.exists(resolved):
+            return resolved
+        # Arial is commonly unavailable on Linux; fall through to substitutes
+    elif configured and os.path.exists(configured):
+        return configured
+    fallback_paths = [
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/Library/Fonts/Arial.ttf",
+        "/System/Library/Fonts/Helvetica.ttc",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+    ]
+    for f in fallback_paths:
+        if os.path.exists(f):
+            return f
+    return None
+
+
+def _font_ttc_index(font_path: str) -> int:
+    """Return TTC face index for multi-face collections (Noto CJK SC = 2)."""
+    if not font_path:
+        return 0
+    base = os.path.basename(font_path).lower().replace("-", "").replace("_", "")
+    # Noto Sans CJK Regular.ttc: JP=0, KR=1, SC=2, TC=3, HK=4
+    if "notosanscjk" in base and base.endswith(".ttc"):
+        return 2
+    return 0
+
+
+def _open_truetype(font_path: str, size: int):
+    """Open a TrueType/OpenType font, including correct TTC face index."""
+    from PIL import ImageFont
+    if not font_path:
+        return ImageFont.load_default()
+    try:
+        idx = _font_ttc_index(font_path)
+        if font_path.lower().endswith(".ttc"):
+            return ImageFont.truetype(font_path, size, index=idx)
+        return ImageFont.truetype(font_path, size)
+    except Exception:
+        try:
+            return ImageFont.truetype(font_path, size)
+        except Exception:
+            return ImageFont.load_default()
+
+
 def _get_font_family_name(font_path: str, default_family: str) -> str:
     """Map a physical font file path to its font family name for ASS."""
     if not font_path:
         return default_family
-    
+
     path_to_family = {
         "/System/Library/Fonts/STHeiti Medium.ttc": "Heiti SC",
         "/System/Library/Fonts/PingFang.ttc": "PingFang SC",
         "/System/Library/Fonts/Hiragino Sans GB.ttc": "Hiragino Sans GB",
         "/Library/Fonts/Arial Unicode.ttf": "Arial Unicode MS",
         "/System/Library/Fonts/Supplemental/Arial Unicode.ttf": "Arial Unicode MS",
+        "/System/Library/Fonts/Supplemental/Arial.ttf": "Arial",
+        "/Library/Fonts/Arial.ttf": "Arial",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc": "Noto Sans CJK SC",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc": "Noto Sans CJK SC",
+        "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf": "Noto Sans CJK SC",
+        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc": "WenQuanYi Micro Hei",
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc": "WenQuanYi Zen Hei",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf": "Liberation Sans",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf": "DejaVu Sans",
+        "/usr/share/fonts/truetype/freefont/FreeSans.ttf": "FreeSans",
     }
-    
+
     norm_path = os.path.normpath(font_path)
     for path, family in path_to_family.items():
         if os.path.normpath(path) == norm_path:
             return family
-            
+
+    # Basename heuristics for Linux packaged variants
+    base = os.path.basename(font_path).lower()
+    base_compact = base.replace("-", "").replace("_", "")
+    if "notosanscjk" in base_compact:
+        return "Noto Sans CJK SC"
+    if "wqy-microhei" in base:
+        return "WenQuanYi Micro Hei"
+    if "wqy-zenhei" in base:
+        return "WenQuanYi Zen Hei"
+    if "liberationsans" in base_compact:
+        return "Liberation Sans"
+    if "dejavusans" in base_compact and "mono" not in base_compact:
+        return "DejaVu Sans"
+
     if os.path.isabs(font_path):
-        base = os.path.basename(font_path)
-        name, _ = os.path.splitext(base)
+        name, _ = os.path.splitext(os.path.basename(font_path))
         return name
-        
+
     return font_path
 
 
@@ -672,17 +762,11 @@ def _make_subtitle_frame(
     inter_gap       = layout["inter_gap"]
     burn_style = _get_bilingual_burn_style(hard_subtitle_mask)
 
-    # Use Heiti SC/PingFang SC for Chinese font, and Arial for English font
-    # If font_path is provided, prefer it for Chinese
-    zh_font_name = font_path or _find_cjk_font(config) or config.font_name_zh
-    en_font_name = config.font_name_en
-
-    try:
-        en_font = ImageFont.truetype(en_font_name, en_fontsize) if en_font_name else ImageFont.load_default()
-        zh_font = ImageFont.truetype(zh_font_name, zh_fontsize) if zh_font_name else ImageFont.load_default()
-    except Exception:
-        en_font = ImageFont.load_default()
-        zh_font = ImageFont.load_default()
+    # Resolve real font files so PIL metrics match libass rendering (esp. Linux)
+    zh_font_path = font_path or _find_cjk_font(config) or config.font_name_zh
+    en_font_path = _find_latin_font(config) or config.font_name_en
+    en_font = _open_truetype(en_font_path, en_fontsize)
+    zh_font = _open_truetype(zh_font_path, zh_fontsize)
 
     # Strip newlines and extra spaces to keep each on a single line
     import re
@@ -714,6 +798,9 @@ def _make_subtitle_frame(
 
     content_w = max(en_w, zh_w)
     content_h = en_h + zh_h + (inter_gap if en_text and zh_text else 0)
+    # Safety pad: PIL vs libass metrics can differ slightly across platforms
+    content_w = int(content_w * 1.06) + 4
+    content_h = int(content_h * 1.06) + 4
 
     geom = _compute_bilingual_card_geometry(
         frame_width=width,
@@ -1355,20 +1442,15 @@ def _srts_to_bilingual_ass(
     inter_gap = layout["inter_gap"]
 
     font_zh = _find_cjk_font(config) or config.font_name_zh
-    font_en = config.font_name_en
+    font_en = _find_latin_font(config) or config.font_name_en
 
-    # Map physical font path to font family name for ASS compatibility
+    # Map physical font paths to family names so ASS \fn matches PIL measure fonts
     font_zh_family = _get_font_family_name(font_zh, config.font_name_zh)
+    font_en_family = _get_font_family_name(font_en, config.font_name_en)
 
-    # Load fonts in PIL to measure exact text dimensions
-    try:
-        en_font = ImageFont.truetype(font_en, en_fontsize) if font_en else ImageFont.load_default()
-    except Exception:
-        en_font = ImageFont.load_default()
-    try:
-        zh_font = ImageFont.truetype(font_zh, zh_fontsize) if font_zh else ImageFont.load_default()
-    except Exception:
-        zh_font = ImageFont.load_default()
+    # Load the same resolved fonts in PIL to measure exact text dimensions
+    en_font = _open_truetype(font_en, en_fontsize)
+    zh_font = _open_truetype(font_zh, zh_fontsize)
 
     dummy_img = Image.new("RGBA", (1, 1))
     dummy_draw = ImageDraw.Draw(dummy_img)
@@ -1416,6 +1498,9 @@ def _srts_to_bilingual_ass(
 
         content_w = max(en_w, zh_w)
         content_h = en_h + zh_h + (inter_gap if en_text and zh_text else 0)
+        # Safety pad: PIL vs libass metrics can differ slightly across platforms
+        content_w = int(content_w * 1.06) + 4
+        content_h = int(content_h * 1.06) + 4
 
         geom = _compute_bilingual_card_geometry(
             frame_width=play_res_x,
@@ -1459,7 +1544,7 @@ def _srts_to_bilingual_ass(
         text_y_anchor = geom["text_y_anchor"]
         text = (
             f"{{\\an2\\pos({play_res_x // 2},{text_y_anchor})}}"
-            f"{{\\q2\\fn{font_en}\\fs{en_fontsize}\\c{color_en}}}{en_text}\\N"
+            f"{{\\q2\\fn{font_en_family}\\fs{en_fontsize}\\c{color_en}}}{en_text}\\N"
             f"{{\\fn{font_zh_family}\\fs{zh_fontsize}\\c{color_zh}}}{zh_text}"
         )
         text_event = f"Dialogue: 1,{start},{end},Default,,0,0,0,,{text}"
