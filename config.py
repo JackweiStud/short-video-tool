@@ -283,9 +283,9 @@ class Config:
     """LLM 语义分段并发窗口数"""
     
     llm_timeout: int = field(
-        default_factory=lambda: int(os.getenv("LLM_TIMEOUT", "60"))
+        default_factory=lambda: int(os.getenv("LLM_TIMEOUT", "180"))
     )
-    """LLM API 调用超时(秒)"""
+    """LLM API 调用超时(秒)。视频摘要 JSON 生成偏慢，默认 180；可用环境变量覆盖"""
     
     # ==================== 翻译器 (Translator) 设置 ====================
     

@@ -2613,6 +2613,7 @@ Transcript:
             "你是一个严谨、克制、重证据的视频总结助手。"
             "你必须只返回严格 JSON，避免夸张、营销腔和无依据推断。"
         )
+        # 16000 过大：摘要 JSON 实际远小于此，却拉长生成时间易触发 Read timeout
         payload = {
             "model": self.llm_model,
             "messages": [
@@ -2620,23 +2621,43 @@ Transcript:
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0.3,
-            "max_tokens": 16000,
+            "max_tokens": 4096,
         }
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
 
+        # 摘要路径单独保底超时（默认配置已抬到 180；仍取 max 防被环境变量压太低）
+        summary_timeout = max(int(self.llm_timeout or 0), 180)
+        max_attempts = 3
         response = None
         last_error = None
-        for attempt in range(1, 3):
+        for attempt in range(1, max_attempts + 1):
             try:
                 response = requests.post(
                     f"{base_url}/chat/completions",
                     headers=headers,
                     json=payload,
-                    timeout=self.llm_timeout,
+                    timeout=summary_timeout,
                 )
+                if response.status_code in (429, 500, 502, 503, 504):
+                    last_error = (
+                        f"retryable status {response.status_code}: "
+                        f"{(response.text or '')[:300]}"
+                    )
+                    logging.warning(
+                        "Video summary request attempt %s returned retryable "
+                        "status for %s: %s",
+                        attempt,
+                        video_name,
+                        last_error,
+                    )
+                    response = None
+                    if attempt < max_attempts:
+                        time.sleep(1.5 * attempt)
+                        continue
+                    break
                 break
             except requests.RequestException as e:
                 last_error = e
@@ -2646,7 +2667,7 @@ Transcript:
                     video_name,
                     e,
                 )
-                if attempt < 2:
+                if attempt < max_attempts:
                     time.sleep(1.5 * attempt)
 
         if response is None:

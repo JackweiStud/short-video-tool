@@ -22,6 +22,8 @@ print(d.get('LLM_API_KEY') or d.get('SILICONFLOW_API_KEY'))
 PY
 )"
 fi
+# Bot PC: video summary needs longer read timeout than legacy 60s default
+export LLM_TIMEOUT="${LLM_TIMEOUT:-180}"
 URL="${1:?usage: run_x_bilingual.sh <x-or-video-url> [output-subdir]}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 OUT="${2:-$OUT_ROOT/x-$STAMP}"
