@@ -470,9 +470,19 @@ class Config:
     """yt-dlp 从哪个浏览器读取登录态 cookies；设为空字符串则禁用"""
 
     ytdlp_youtube_player_client: str = field(
-        default_factory=lambda: os.getenv("YTDLP_YOUTUBE_PLAYER_CLIENT", "tv")
+        default_factory=lambda: os.getenv("YTDLP_YOUTUBE_PLAYER_CLIENT", "")
     )
-    """yt-dlp 的 YouTube player_client；设为空字符串则不传该参数"""
+    """yt-dlp 的 YouTube player_client；默认空 = 交给 yt-dlp 自选（硬编码 "tv" 会触发 "The page needs to be reloaded"）"""
+
+    ytdlp_youtube_fallback_clients: str = field(
+        default_factory=lambda: os.getenv("YTDLP_YOUTUBE_FALLBACK_CLIENTS", "tv,web_safari,mweb,android_vr")
+    )
+    """YouTube 报 "page needs to be reloaded"/bot 校验时，依次重试的 player_client（逗号分隔；空=不重试）"""
+
+    ytdlp_js_runtime: str = field(
+        default_factory=lambda: os.getenv("YTDLP_JS_RUNTIME", "")
+    )
+    """yt-dlp 的 JS 运行时：deno/node/bun 或其路径；默认自动检测 deno→node"""
 
     video_quality: str = field(
         default_factory=lambda: os.getenv("VIDEO_QUALITY", "best")

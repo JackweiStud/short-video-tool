@@ -1,5 +1,5 @@
 # Video Download
-yt-dlp==2026.3.13
+yt-dlp[default]>=2026.8.19  # YouTube needs JS runtime (deno/node) + yt-dlp-ejs; nightly (--pre) may be needed when YouTube changes
 
 # Audio/Video Processing
 librosa==0.11.0

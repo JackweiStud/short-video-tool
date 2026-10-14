@@ -246,6 +246,11 @@ class Downloader:
                 "youtube": {"player_client": [youtube_player_client]}
             }
 
+        # YouTube needs a JS runtime (yt-dlp >= 2025.11); yt-dlp only enables deno by default.
+        js_runtimes = self._detect_js_runtimes()
+        if js_runtimes:
+            ydl_opts["js_runtimes"] = js_runtimes
+
         # Special handling for Twitter/X URLs to extract direct video URLs if possible
         if "x.com" in url or "twitter.com" in url:
             try:
@@ -261,7 +266,7 @@ class Downloader:
         info_dict = None
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info_dict = ydl.extract_info(url, download=True)
+                info_dict = self._extract_with_youtube_fallback(ydl_opts, url, ydl)
                 if not info_dict:
                     logging.error(f"Failed to extract info or download for URL: {url}")
                     return None
@@ -325,6 +330,44 @@ class Downloader:
         except Exception as e:
             logging.error(f"An unexpected error occurred during download for URL: {url}. Error: {e}")
             return None
+
+    _YT_RETRY_ERRORS = ("page needs to be reloaded", "confirm you", "not a bot")
+
+    def _detect_js_runtimes(self) -> dict:
+        configured = getattr(self.config, "ytdlp_js_runtime", "").strip()
+        if configured:
+            name = os.path.basename(configured).split(".")[0].lower()
+            if name in ("deno", "node", "bun", "quickjs"):
+                return {name: {"path": configured} if os.sep in configured else {}}
+            return {configured.lower(): {}}
+        for name in ("deno", "node"):
+            path = shutil.which(name)
+            if path:
+                return {name: {"path": path}}
+        return {}
+
+    def _extract_with_youtube_fallback(self, ydl_opts: dict, url: str, ydl):
+        """Try once with the configured opts; on YouTube reload/bot errors retry with fallback player_clients."""
+        try:
+            return ydl.extract_info(url, download=True)
+        except yt_dlp.DownloadError as e:
+            msg = str(e).lower()
+            is_youtube = "youtube" in msg or "youtu" in url
+            if not is_youtube or not any(k in msg for k in self._YT_RETRY_ERRORS):
+                raise
+            clients = [c.strip() for c in getattr(
+                self.config, "ytdlp_youtube_fallback_clients", "").split(",") if c.strip()]
+            last = e
+            for client in clients:
+                logging.warning(f"[Downloader] YouTube error, retrying with player_client={client}")
+                opts = dict(ydl_opts)
+                opts["extractor_args"] = {"youtube": {"player_client": [client]}}
+                try:
+                    with yt_dlp.YoutubeDL(opts) as retry_ydl:
+                        return retry_ydl.extract_info(url, download=True)
+                except yt_dlp.DownloadError as retry_err:
+                    last = retry_err
+            raise last
 
     def _download_progress_hook(self, d):
         # This hook is currently silenced by 'quiet': True in ydl_opts
