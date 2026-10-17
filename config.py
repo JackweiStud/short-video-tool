@@ -475,14 +475,14 @@ class Config:
     """yt-dlp 的 YouTube player_client；默认空 = 交给 yt-dlp 自选（硬编码 "tv" 会触发 "The page needs to be reloaded"）"""
 
     ytdlp_youtube_fallback_clients: str = field(
-        default_factory=lambda: os.getenv("YTDLP_YOUTUBE_FALLBACK_CLIENTS", "tv,web_safari,mweb,android_vr")
+        default_factory=lambda: os.getenv("YTDLP_YOUTUBE_FALLBACK_CLIENTS", "web_embedded,tv,web_safari,mweb,android_vr")
     )
-    """YouTube 报 "page needs to be reloaded"/bot 校验时，依次重试的 player_client（逗号分隔；空=不重试）"""
+    """YouTube 报 "page needs to be reloaded"/bot 校验/429/无可用格式时，依次重试的 player_client（逗号分隔；空=不重试）。web_embedded 在 IP 被风控时仍常可用，故放第一"""
 
     ytdlp_js_runtime: str = field(
         default_factory=lambda: os.getenv("YTDLP_JS_RUNTIME", "")
     )
-    """yt-dlp 的 JS 运行时：deno/node/bun 或其路径；默认自动检测 deno→node"""
+    """yt-dlp 的 JS 运行时：deno/node/bun 或其路径；默认自动检测 deno（PATH→venv/bin）→ node>=22（node 20 被 yt-dlp-ejs 判为 unsupported）"""
 
     video_quality: str = field(
         default_factory=lambda: os.getenv("VIDEO_QUALITY", "best")

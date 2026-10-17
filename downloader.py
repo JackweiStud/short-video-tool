@@ -5,6 +5,8 @@ import shutil
 import logging
 import glob
 import re
+import subprocess
+import sys
 from typing import Optional
 
 from config import Config, get_config
@@ -162,7 +164,15 @@ class Downloader:
         # because their progressive muxed streams cap at 720p — preferring them would
         # silently downgrade a 1080p request. Those sites keep the split format, which
         # already benefits from concurrent_fragment_downloads.
-        if quality == "best":
+        is_youtube = self._is_youtube_url(url)
+        if is_youtube and (quality == "best" or quality.endswith('p')):
+            # YouTube: H.264 (avc1) video + ORIGINAL-language m4a audio. Videos with
+            # auto-dubbed tracks expose many audio languages; plain "bestaudio" can
+            # land on a dubbed one. avc1 tops out at 1080p on YouTube, so "best"
+            # yields <=1080p H.264 without a height filter (works for vertical too).
+            h = None if quality == "best" else quality[:-1]
+            format_string = self._youtube_format_string(h)
+        elif quality == "best":
             if is_twitter:
                 format_string = 'best[protocol^=http][acodec!=none][vcodec!=none]/bestvideo+bestaudio/best'
             else:
@@ -331,19 +341,81 @@ class Downloader:
             logging.error(f"An unexpected error occurred during download for URL: {url}. Error: {e}")
             return None
 
-    _YT_RETRY_ERRORS = ("page needs to be reloaded", "confirm you", "not a bot")
+    # Lower-cased substrings of yt-dlp errors that justify retrying YouTube with
+    # another player_client. 429 / n-challenge / JS-runtime problems usually surface
+    # as "Requested format is not available" or "Only images are available".
+    _YT_RETRY_ERRORS = (
+        "page needs to be reloaded",
+        "confirm you",
+        "not a bot",
+        "http error 429",
+        "too many requests",
+        "n challenge solving failed",
+        "no supported javascript runtime",
+        "requested format is not available",
+        "only images are available",
+    )
+
+    # yt-dlp-ejs rejects older Node releases (node 20 is reported as "unsupported").
+    _MIN_NODE_MAJOR = 22
+
+    @staticmethod
+    def _is_youtube_url(url: str) -> bool:
+        return bool(re.search(r"(^|[/.])(youtube\.com|youtu\.be|youtube-nocookie\.com)([/:?]|$)", url or ""))
+
+    @staticmethod
+    def _youtube_format_string(height: Optional[str] = None) -> str:
+        """avc1 video-only (<= height) + original-language m4a, with graceful fallbacks."""
+        hf = f"[height<={height}]" if height else ""
+        audio = (
+            "ba[ext=m4a][format_note*=original][format_id!*=drc]",  # original track, no DRC
+            "ba[ext=m4a][format_note*=original]",
+            "ba[ext=m4a]",  # videos without dubbed tracks have no "original" marker
+        )
+        parts = [f"bv{hf}[vcodec^=avc1]+{a}" for a in audio]
+        parts += [f"bv{hf}+ba[format_note*=original]", f"bv{hf}+ba", f"b{hf}"]
+        if hf:
+            parts.append("b")
+        return "/".join(parts)
+
+    @staticmethod
+    def _node_major(path: str) -> Optional[int]:
+        try:
+            out = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=10).stdout
+        except Exception:
+            return None
+        m = re.match(r"v?(\d+)", out.strip())
+        return int(m.group(1)) if m else None
 
     def _detect_js_runtimes(self) -> dict:
+        """YTDLP_JS_RUNTIME overrides; else deno (PATH, then venv bin next to python); else node >= 22."""
         configured = getattr(self.config, "ytdlp_js_runtime", "").strip()
         if configured:
             name = os.path.basename(configured).split(".")[0].lower()
             if name in ("deno", "node", "bun", "quickjs"):
                 return {name: {"path": configured} if os.sep in configured else {}}
             return {configured.lower(): {}}
-        for name in ("deno", "node"):
-            path = shutil.which(name)
-            if path:
-                return {name: {"path": path}}
+
+        deno = shutil.which("deno")
+        if not deno:
+            # e.g. `pip install deno` into the venv: bin/deno sits next to bin/python
+            candidate = os.path.join(os.path.dirname(sys.executable), "deno")
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                deno = candidate
+        if deno:
+            return {"deno": {"path": deno}}
+
+        node = shutil.which("node")
+        if node:
+            major = self._node_major(node)
+            if major is not None and major >= self._MIN_NODE_MAJOR:
+                return {"node": {"path": node}}
+            logging.warning(
+                f"[Downloader] node {major or '?'} found but yt-dlp-ejs needs node >= "
+                f"{self._MIN_NODE_MAJOR}; install deno (pip install deno) for YouTube"
+            )
+        else:
+            logging.warning("[Downloader] No JS runtime (deno/node>=22) found; YouTube may fail")
         return {}
 
     def _extract_with_youtube_fallback(self, ydl_opts: dict, url: str, ydl):
@@ -352,7 +424,7 @@ class Downloader:
             return ydl.extract_info(url, download=True)
         except yt_dlp.DownloadError as e:
             msg = str(e).lower()
-            is_youtube = "youtube" in msg or "youtu" in url
+            is_youtube = "youtube" in msg or self._is_youtube_url(url)
             if not is_youtube or not any(k in msg for k in self._YT_RETRY_ERRORS):
                 raise
             clients = [c.strip() for c in getattr(
